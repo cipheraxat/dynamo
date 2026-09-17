@@ -1346,6 +1346,11 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
+    card.model_type.supports_chat()
+        && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
+}
+
 fn effective_router_config<'a>(
     worker_config: Option<&'a RouterConfig>,
     frontend_config: &'a RouterConfig,
@@ -2730,6 +2735,27 @@ mod tests {
 
         card.worker_type = Some(WorkerType::Decode);
         assert!(validate_policy_worker_role(&card, &factory).is_ok());
+    }
+
+    #[test]
+    fn parser_version_validation_applies_only_to_chat_surfaces() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+
+        card.model_type = ModelType::Embedding;
+        assert!(!should_validate_parser_version(&card));
+
+        card.model_type = ModelType::Chat;
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Encode);
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(!should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(should_validate_parser_version(&card));
     }
 
     #[test]
