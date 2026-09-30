@@ -474,11 +474,13 @@ jobs:
   # ============================================================================
 
   sidecar-native-test:
-    name: vllm-sidecar native integration
-    needs: [vllm-build]
+    name: sidecar native integration
+    needs: [vllm-build, sglang-build]
+    if: ${{ !cancelled() && (needs.vllm-build.result == 'success' || needs.sglang-build.result == 'success') }}
     uses: $/.github/workflows/shared-sidecar-tests.yml
     with:
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      target_tag_plain: ${{ needs.vllm-build.result == 'success' && needs.vllm-build.outputs.target_tag_plain || '' }}
+      sglang_target_tag_plain: ${{ needs.sglang-build.result == 'success' && needs.sglang-build.outputs.target_tag_plain || '' }}
       dd_env: post-merge
     secrets: inherit
 

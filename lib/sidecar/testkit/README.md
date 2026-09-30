@@ -34,11 +34,11 @@ lib/sidecar/
     ├── tests/
     │   ├── conformance.rs     # Direct sidecar-to-Mocker scenarios over real gRPC
     │   ├── cross_process.rs   # Sidecar children, discovery, routing and shutdown
-    │   ├── native_engine.rs   # Real vLLM compatibility, cancellation and KV transfer
+    │   ├── native_engine.rs   # Real vLLM/SGLang compatibility, cancellation and KV transfer
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
-    │       ├── sglang.rs      # SGLang protocol and Mocker adapter
+    │       ├── sglang.rs      # SGLang protocol, discovery, health and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     ├── native_probe.py        # Observes completed native NIXL transfers
     └── README.md              # This guide
@@ -117,10 +117,10 @@ flowchart TD
     P --> R[Real PrefillRouter]
     R --> B
     N[pytest native launcher] --> T[native_engine.rs]
-    N --> V[Real vLLM processes and model weights]
+    N --> V[Real vLLM or SGLang processes and model weights]
     T --> E2[Production sidecar engine]
     E2 -->|native gRPC| V
-    V --> K[GPU scheduler and NIXL KV transfer]
+    V --> K[GPU scheduler and native KV transfer]
 ```
 
 The controller sits at the native protocol boundary. Each request ID has its
@@ -138,21 +138,25 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `conformance.rs` | Four common scenarios registered for both vLLM and SGLang; active cancellation, consumer drop and peer teardown initially enrolled for vLLM; vLLM request/logprob fields, admission rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
-| `cross_process.rs` | Registration and error recovery, readiness, startup failure/interruption, request isolation, SIGTERM withdrawal/drain; vLLM prefill/decode handoff through the real router | CPU, ordinary pre-merge Cargo tests |
+| `conformance.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
+| `cross_process.rs` | Both backends: registration/error recovery, readiness, startup failure, cancellation, SIGTERM and real PrefillRouter handoff; SGLang discovery identity, HealthCheck and changed-role startup | CPU, ordinary pre-merge Cargo tests |
 | `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer between engines | GPU, post-merge and nightly via pytest |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
-SGLang currently registers the four baseline scenarios. Its process and active
-work enrollment requires implementing and exercising the additional fixture
-contract. TensorRT-LLM is not enrolled here.
+Both vLLM and SGLang register the shared wire and process scenarios.
+TensorRT-LLM is not enrolled here.
 
-The native tests retain their own purpose: a Mocker cannot prove that real vLLM
+The native tests retain their own purpose: a Mocker cannot prove that a real engine
 accepts the serialized request, executes a structured-output constraint, releases
-its real scheduler work, or transfers GPU KV cache through NIXL. CPU handoff
-checks the routing and opaque metadata contract. Native handoff separately
-requires completed transfer bytes and compares output with local inference.
-Neither check establishes migration or cancellation during an actual transfer.
+its real scheduler work, or transfers GPU KV cache. CPU handoff checks
+opaque vLLM metadata and SGLang concurrent bootstrap coordination. Native handoff
+separately requires generated tokens and completed transfer bytes.
+SGLang uses its native transfer metrics; vLLM uses the NIXL probe.
+SGLang also cancels decode while its native transfer queue has work, then
+requires that queue to drain before a following handoff succeeds. This does not
+establish migration or cancellation while transfer packets are in flight.
+CPU handoff cancellation holds the peers before Mocker admission; it proves
+transport cleanup and recovery, not native scheduler or transfer cleanup.
 
 Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
 KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
@@ -199,7 +203,8 @@ Build the sidecar binary and run the testkit together from the repository root:
 
 ```sh
 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 \
-  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sidecar-testkit
+  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar \
+    -p dynamo-sidecar-testkit
 ```
 
 Use normal test parallelism. These suites need a Linux host with the repository's
@@ -207,10 +212,10 @@ Rust build prerequisites, permission to bind loopback sockets and spawn child
 processes, and writable temporary storage. Running them needs no GPU, engine
 installation, model download or external discovery service.
 
-The workspace's ordinary `cargo test --locked --all-targets` builds the vLLM
-executable through its executable integration target. A testkit-only command
+The workspace's ordinary `cargo test --locked --all-targets` builds both sidecar
+executables through their executable integration targets. A testkit-only command
 can instead pick up an older binary from the build directory. Always build the
-vLLM package alongside testkit when validating source changes. After that build,
+vLLM and SGLang packages alongside testkit when validating source changes. After that build,
 you can select a suite or test by name:
 
 ```sh
@@ -220,11 +225,12 @@ cargo test --locked -p dynamo-sidecar-testkit --test cross_process
 
 ### Running native GPU integration tests
 
-Use the repository's vLLM test image and its pinned engine version. The launcher
-checks that the Python vLLM package and bundled `vllm-rs` versions agree. Model
+Use the matching vLLM or SGLang test image and its pinned engine version. The
+launcher checks that Python vLLM and bundled `vllm-rs` versions agree, or that
+SGLang matches its pinned version. Model
 weights for `Qwen/Qwen3-0.6B` must already be cached. Compatibility and cancellation
-need one GPU; handoff is scheduled on two GPUs. The launcher assigns each engine
-its GPU and dynamically allocated ports.
+need one GPU. SGLang handoff shares one GPU; vLLM handoff needs two GPUs. The
+launcher assigns each engine its GPU and dynamically allocated ports.
 
 Build the native Rust test executable on the same platform as the test image:
 
@@ -234,10 +240,10 @@ cargo test --locked -p dynamo-sidecar-testkit --features native-tests \
 export DYNAMO_SIDECAR_NATIVE_TEST="$(jq -r \
   'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "native_engine") | .executable // empty' \
   /tmp/sidecar-native-build.jsonl)"
-python3 -m pytest tests/sidecar/test_native_integration.py -v
+python3 -m pytest tests/sidecar/test_native_integration.py -m sglang -v
 ```
 
-For a one-GPU host, add `-k 'not handoff'`. Set `SIDECAR_NATIVE_MODEL_PATH` to an
+Select `-m vllm` in the vLLM image. For vLLM on a one-GPU host, add `-k 'not handoff'`. Set `SIDECAR_NATIVE_MODEL_PATH` to an
 existing local model directory when needed. CI builds/uploads the executable in
 `shared-sidecar-tests.yml`, and the pytest job downloads it before starting the
 engines. The `native-tests` Cargo feature only enables this explicit GPU target;

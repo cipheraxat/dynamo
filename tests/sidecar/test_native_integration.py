@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from importlib.metadata import distribution
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -19,7 +20,6 @@ from tests.utils.managed_process import ManagedProcess
 MODEL = "Qwen/Qwen3-0.6B"
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = [
-    pytest.mark.vllm,
     pytest.mark.sidecar,
     pytest.mark.sidecar_native,
     pytest.mark.integration,
@@ -28,47 +28,69 @@ pytestmark = [
     pytest.mark.nightly,
     pytest.mark.model(MODEL),
     pytest.mark.timeout(900),
-    pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
 ]
 
 
 @pytest.mark.parametrize(
-    "scenario,engines",
+    "backend,scenario,engines",
     [
         pytest.param(
-            "vllm_native_logprobs_and_structured_output_are_compatible",
-            1,
-            marks=[pytest.mark.gpu_1, pytest.mark.profiled_vram_gib(3.5)],
-            id="compatibility",
-        ),
-        pytest.param(
-            "vllm_cancellation_and_consumer_drop_release_native_work",
-            1,
-            marks=[pytest.mark.gpu_1, pytest.mark.profiled_vram_gib(3.5)],
-            id="cancellation",
-        ),
-        pytest.param(
-            "vllm_handoff_transfers_native_kv", 2, marks=pytest.mark.gpu_2, id="handoff"
-        ),
+            backend,
+            scenario,
+            engines,
+            marks=[
+                getattr(pytest.mark, backend),
+                getattr(pytest.mark, f"gpu_{1 if backend == 'sglang' else engines}"),
+                pytest.mark.requested_vllm_kv_cache_bytes(1119388000)
+                if backend == "vllm"
+                else pytest.mark.requested_sglang_kv_tokens(8192 * engines),
+                *(
+                    [pytest.mark.profiled_vram_gib(3.5)]
+                    if backend == "vllm" and engines == 1
+                    else []
+                ),
+            ],
+            id=f"{backend}-{name}",
+        )
+        for backend in ("vllm", "sglang")
+        for name, scenario, engines in (
+            (
+                "compatibility",
+                "native_logprobs_and_structured_output_are_compatible",
+                1,
+            ),
+            ("cancellation", "cancellation_and_consumer_drop_release_native_work", 1),
+            ("handoff", "handoff_transfers_native_kv", 2),
+        )
     ],
 )
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_native_integration(scenario, engines, tmp_path, dynamo_dynamic_ports):
+def test_native_integration(backend, scenario, engines, tmp_path, dynamo_dynamic_ports):
     binary = Path(os.environ["DYNAMO_SIDECAR_NATIVE_TEST"])
     assert binary.is_file(), f"Missing compiled native_engine test: {binary}"
-    native = shutil.which("vllm-rs") or str(
-        distribution("vllm").locate_file("vllm/vllm-rs")
-    )
-    assert Path(
-        native
-    ).is_file(), "The pinned vLLM release's vllm-rs executable is required"
-    version = subprocess.run(
-        [native, "--version"], check=True, capture_output=True, text=True, timeout=10
-    ).stdout.strip()
-    assert version == f"vllm-rs {package_version('vllm')}", version
+    native = None
+    if backend == "vllm":
+        native = shutil.which("vllm-rs") or str(
+            distribution("vllm").locate_file("vllm/vllm-rs")
+        )
+        assert Path(
+            native
+        ).is_file(), "The pinned vLLM release's vllm-rs executable is required"
+        version = subprocess.run(
+            [native, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        assert version == f"vllm-rs {package_version('vllm')}", version
+    else:
+        assert package_version("sglang") == "0.5.19"
     gpu_ids = os.environ.get(
         "SIDECAR_NATIVE_GPUS", os.environ.get("CUDA_VISIBLE_DEVICES", "0,1")
     ).split(",")
+    if backend == "sglang":
+        gpu_ids = [gpu_ids[0]] * engines
     assert len(gpu_ids) >= engines and all(
         gpu_ids
     ), "Insufficient assigned GPUs for native integration"
@@ -80,7 +102,8 @@ def test_native_integration(scenario, engines, tmp_path, dynamo_dynamic_ports):
         SIDECAR_NATIVE_MODEL="sidecar-native",
         SIDECAR_NATIVE_TRANSFER_PROBE=str(probe),
     )
-    if scenario == "vllm_native_logprobs_and_structured_output_are_compatible":
+    structured_tokens = tmp_path / "structured-tokens.json"
+    if scenario == "native_logprobs_and_structured_output_are_compatible":
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
@@ -92,44 +115,84 @@ def test_native_integration(scenario, engines, tmp_path, dynamo_dynamic_ports):
             enable_thinking=False,
         )
         environment["SIDECAR_NATIVE_STRUCTURED_PROMPT"] = json.dumps(tokens)
+        environment["SIDECAR_NATIVE_STRUCTURED_TOKENS"] = str(structured_tokens)
     with contextlib.ExitStack() as stack:
         for index in range(engines):
             http_port = dynamo_dynamic_ports.system_ports[index]
             grpc_port = dynamo_dynamic_ports.kv_event_ports[index]
             nixl_port = dynamo_dynamic_ports.nixl_side_channel_ports[index]
-            command = [
-                native,
-                "serve",
-                model,
-                "--served-model-name",
-                "sidecar-native",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(http_port),
-                "--grpc-port",
-                str(grpc_port),
-                "--max-model-len",
-                "8192",
-                "--",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "2",
-                "--kv-cache-memory-bytes",
-                "1119388000",
-                "--gpu-memory-utilization",
-                "0.01",
-            ]
-            if scenario == "vllm_native_logprobs_and_structured_output_are_compatible":
-                separator = command.index("--")
-                command[separator:separator] = ["--reasoning-parser", "none"]
-            if engines == 2:
-                command += [
-                    "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
-                    "--worker-extension-cls",
-                    "native_probe.TransferProbe",
+            if backend == "vllm":
+                command = [
+                    native,
+                    "serve",
+                    model,
+                    "--served-model-name",
+                    "sidecar-native",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(http_port),
+                    "--grpc-port",
+                    str(grpc_port),
+                    "--max-model-len",
+                    "8192",
+                    "--",
+                    "--enforce-eager",
+                    "--max-num-seqs",
+                    "2",
+                    "--kv-cache-memory-bytes",
+                    "1119388000",
+                    "--gpu-memory-utilization",
+                    "0.01",
                 ]
+                if scenario == "native_logprobs_and_structured_output_are_compatible":
+                    separator = command.index("--")
+                    command[separator:separator] = ["--reasoning-parser", "none"]
+                if engines == 2:
+                    command += [
+                        "--kv-transfer-config",
+                        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                        "--worker-extension-cls",
+                        "native_probe.TransferProbe",
+                    ]
+            else:
+                command = [
+                    sys.executable,
+                    "-m",
+                    "sglang.launch_server",
+                    "--model-path",
+                    model,
+                    "--served-model-name",
+                    "sidecar-native",
+                    "--host",
+                    "0.0.0.0" if engines == 2 else "127.0.0.1",
+                    "--port",
+                    str(http_port),
+                    "--grpc-port",
+                    str(grpc_port),
+                    "--context-length",
+                    "8192",
+                    "--max-running-requests",
+                    "2",
+                    "--max-total-tokens",
+                    "8192",
+                    "--mem-fraction-static",
+                    "0.2",
+                    "--disable-cuda-graph",
+                    "--enable-metrics",
+                    "--decode-log-interval",
+                    "1",
+                    "--incremental-streaming-output",
+                ]
+                if engines == 2:
+                    command += [
+                        "--disaggregation-mode",
+                        "decode" if index == 0 else "prefill",
+                        "--disaggregation-transfer-backend",
+                        "nixl",
+                        "--disaggregation-bootstrap-port",
+                        str(nixl_port),
+                    ]
             env = dict(
                 environment,
                 CUDA_VISIBLE_DEVICES=gpu_ids[index],
@@ -145,7 +208,8 @@ def test_native_integration(scenario, engines, tmp_path, dynamo_dynamic_ports):
             stack.enter_context(
                 ManagedProcess(
                     command=command,
-                    display_name=f"vllm-native-{index}",
+                    working_dir=str(tmp_path),
+                    display_name=f"{backend}-native-{index}",
                     env=env,
                     health_check_urls=[f"http://127.0.0.1:{http_port}/health"],
                     timeout=600,
@@ -155,16 +219,27 @@ def test_native_integration(scenario, engines, tmp_path, dynamo_dynamic_ports):
             )
             key = "SIDECAR_NATIVE_GRPC" if index == 0 else "SIDECAR_NATIVE_PREFILL_GRPC"
             environment[key] = f"http://127.0.0.1:{grpc_port}"
-            if index == 0:
-                environment[
-                    "SIDECAR_NATIVE_METRICS"
-                ] = f"http://127.0.0.1:{http_port}/metrics"
+            metrics_key = (
+                "SIDECAR_NATIVE_METRICS"
+                if index == 0
+                else "SIDECAR_NATIVE_PREFILL_METRICS"
+            )
+            environment[metrics_key] = f"http://127.0.0.1:{http_port}/metrics"
         result = subprocess.run(
-            [str(binary), scenario, "--exact", "--nocapture"],
+            [str(binary), f"{backend}_{scenario}", "--exact", "--nocapture"],
             env=environment,
+            check=False,
             capture_output=True,
             text=True,
             timeout=120,
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "1 passed; 0 failed; 0 ignored;" in result.stdout, result.stdout
+        if (
+            backend == "sglang"
+            and scenario == "native_logprobs_and_structured_output_are_compatible"
+        ):
+            output = tokenizer.decode(
+                json.loads(structured_tokens.read_text()), skip_special_tokens=True
+            )
+            assert json.loads(output) == {"ok": True}, output

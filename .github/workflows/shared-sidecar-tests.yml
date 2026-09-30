@@ -8,7 +8,10 @@ on:
     inputs:
       target_tag_plain:
         type: string
-        required: true
+        default: ''
+      sglang_target_tag_plain:
+        type: string
+        default: ''
       source_ref:
         type: string
         default: ''
@@ -66,9 +69,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  native:
+  native-vllm:
     name: vLLM native cancellation and KV transfer
     needs: build-native
+    if: ${{ inputs.target_tag_plain != '' }}
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sidecar-native
@@ -82,7 +86,31 @@ jobs:
       platform: '["amd64"]'
       run_sanity_check: false
       run_cpu_only_tests: false
-      gpu_test_markers: sidecar_native
+      gpu_test_markers: sidecar_native and vllm
+      gpu_test_timeout_minutes: 30
+      dd_env: ${{ inputs.dd_env }}
+      dd_flaky_retry_enabled: 'false'
+      sidecar_native_artifact: sidecar-native-${{ inputs.source_ref || github.sha }}
+    secrets: inherit
+
+  native-sglang:
+    name: SGLang native cancellation and KV transfer
+    needs: build-native
+    if: ${{ inputs.sglang_target_tag_plain != '' }}
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sidecar-native
+      framework: sglang
+      test_type: Native integration
+      amd_runner: prod-tester-amd-gpu-2-v2
+      target_tag_plain: ${{ inputs.sglang_target_tag_plain }}
+      source_ref: ${{ inputs.source_ref }}
+      image_tag_suffix: ${{ inputs.image_tag_suffix }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      gpu_test_markers: sidecar_native and sglang
       gpu_test_timeout_minutes: 30
       dd_env: ${{ inputs.dd_env }}
       dd_flaky_retry_enabled: 'false'

@@ -147,7 +147,7 @@ on:
         type: string
         default: ''
       sidecar_native_artifact:
-        description: 'Artifact containing the direct vLLM native integration test executable'
+        description: 'Artifact containing the shared native sidecar integration test executable'
         required: false
         type: string
         default: ''
