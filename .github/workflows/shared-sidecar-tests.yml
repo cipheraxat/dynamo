@@ -12,9 +12,6 @@ on:
       sglang_target_tag_plain:
         type: string
         default: ''
-      source_ref:
-        type: string
-        default: ''
       image_tag_suffix:
         type: string
         default: ''
@@ -33,7 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ inputs.source_ref || github.sha }}
           lfs: true
       - name: Install protoc
         shell: bash
@@ -64,7 +60,7 @@ jobs:
           strip -o "${RUNNER_TEMP}/sidecar-native/native_engine" "$executable"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: sidecar-native-${{ inputs.source_ref || github.sha }}
+          name: sidecar-native-${{ github.sha }}
           path: ${{ runner.temp }}/sidecar-native/native_engine
           if-no-files-found: error
           retention-days: 7
@@ -80,7 +76,7 @@ jobs:
       test_type: Native integration
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ inputs.target_tag_plain }}
-      source_ref: ${{ inputs.source_ref }}
+      source_ref: ${{ github.sha }}
       image_tag_suffix: ${{ inputs.image_tag_suffix }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -90,7 +86,7 @@ jobs:
       gpu_test_timeout_minutes: 30
       dd_env: ${{ inputs.dd_env }}
       dd_flaky_retry_enabled: 'false'
-      sidecar_native_artifact: sidecar-native-${{ inputs.source_ref || github.sha }}
+      sidecar_native_artifact: sidecar-native-${{ github.sha }}
     secrets: inherit
 
   native-sglang:
@@ -104,7 +100,7 @@ jobs:
       test_type: Native integration
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ inputs.sglang_target_tag_plain }}
-      source_ref: ${{ inputs.source_ref }}
+      source_ref: ${{ github.sha }}
       image_tag_suffix: ${{ inputs.image_tag_suffix }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -114,5 +110,5 @@ jobs:
       gpu_test_timeout_minutes: 30
       dd_env: ${{ inputs.dd_env }}
       dd_flaky_retry_enabled: 'false'
-      sidecar_native_artifact: sidecar-native-${{ inputs.source_ref || github.sha }}
+      sidecar_native_artifact: sidecar-native-${{ github.sha }}
     secrets: inherit

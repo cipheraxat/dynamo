@@ -150,7 +150,7 @@ The native tests retain their own purpose: a Mocker cannot prove that a real eng
 accepts the serialized request, executes a structured-output constraint, releases
 its real scheduler work, or transfers GPU KV cache. CPU handoff checks
 opaque vLLM metadata and SGLang concurrent bootstrap coordination. Native handoff
-separately requires generated tokens and completed transfer bytes.
+separately requires completed transfer bytes and checks decode output length and token usage.
 SGLang uses its native transfer metrics; vLLM uses the NIXL probe.
 SGLang also cancels decode while its native transfer queue has work, then
 requires that queue to drain before a following handoff succeeds. This does not

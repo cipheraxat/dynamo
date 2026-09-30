@@ -912,13 +912,12 @@ jobs:
 
   sidecar-native-test:
     name: sidecar native integration
-    needs: [vllm-build, sglang-build, resolve-source-sha, compute-release-mode]
+    needs: [vllm-build, sglang-build, compute-release-mode]
     if: ${{ !cancelled() && needs.compute-release-mode.outputs.run_tests == 'true' && (needs.vllm-build.result == 'success' || needs.sglang-build.result == 'success') }}
     uses: $/.github/workflows/shared-sidecar-tests.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.result == 'success' && needs.vllm-build.outputs.target_tag_plain || '' }}
       sglang_target_tag_plain: ${{ needs.sglang-build.result == 'success' && needs.sglang-build.outputs.target_tag_plain || '' }}
-      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
       dd_env: nightly
     secrets: inherit
