@@ -140,7 +140,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `conformance.rs` | Four common scenarios registered for both vLLM and SGLang; active cancellation, consumer drop and peer teardown initially enrolled for vLLM; vLLM request/logprob fields, admission rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
 | `cross_process.rs` | Registration and error recovery, readiness, startup failure/interruption, request isolation, SIGTERM withdrawal/drain; vLLM prefill/decode handoff through the real router | CPU, ordinary pre-merge Cargo tests |
-| `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer between engines | GPU, post-merge only via pytest |
+| `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer between engines | GPU, post-merge and nightly via pytest |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 SGLang currently registers the four baseline scenarios. Its process and active
@@ -220,9 +220,9 @@ cargo test --locked -p dynamo-sidecar-testkit --test cross_process
 
 ### Running native GPU integration tests
 
-The GPU suite runs post-merge, separately from E2E, using the same vLLM test image,
-pinned engine version, GPU runners and shared pytest setup as the sidecar E2E
-tests. It uses the same `predownload_models` fixture to prepare
+The GPU suite runs post-merge and nightly, separately from E2E, using the same
+vLLM test image, pinned engine version, GPU runners and shared pytest setup as the
+sidecar E2E tests. It uses the same `predownload_models` fixture to prepare
 `Qwen/Qwen3-0.6B` before starting an engine. The launcher checks that the Python
 vLLM package and bundled `vllm-rs` versions agree. Compatibility and cancellation
 need one GPU; handoff is scheduled on two GPUs. The launcher assigns each engine

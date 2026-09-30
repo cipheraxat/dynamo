@@ -25,6 +25,7 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.core,
     pytest.mark.post_merge,
+    pytest.mark.nightly,
     pytest.mark.model(MODEL),
     pytest.mark.timeout(900),
     pytest.mark.requested_vllm_kv_cache_bytes(1119388000),

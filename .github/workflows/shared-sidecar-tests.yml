@@ -9,6 +9,9 @@ on:
       target_tag_plain:
         type: string
         required: true
+      image_tag_suffix:
+        type: string
+        default: ''
       dd_env:
         type: string
         required: true
@@ -70,11 +73,12 @@ jobs:
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ inputs.target_tag_plain }}
       source_ref: ${{ github.sha }}
+      image_tag_suffix: ${{ inputs.image_tag_suffix }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
       run_cpu_only_tests: false
-      gpu_test_markers: post_merge and sidecar_native
+      gpu_test_markers: (post_merge or nightly) and sidecar_native
       gpu_test_timeout_minutes: 30
       dd_env: ${{ inputs.dd_env }}
       dd_flaky_retry_enabled: 'false'
