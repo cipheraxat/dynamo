@@ -25,7 +25,6 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.core,
     pytest.mark.post_merge,
-    pytest.mark.nightly,
     pytest.mark.model(MODEL),
     pytest.mark.timeout(900),
     pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
@@ -53,7 +52,9 @@ pytestmark = [
     ],
 )
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_native_integration(scenario, engines, tmp_path, dynamo_dynamic_ports):
+def test_native_integration(
+    scenario, engines, tmp_path, dynamo_dynamic_ports, predownload_models
+):
     binary = Path(os.environ["DYNAMO_SIDECAR_NATIVE_TEST"])
     assert binary.is_file(), f"Missing compiled native_engine test: {binary}"
     native = shutil.which("vllm-rs") or str(

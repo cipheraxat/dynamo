@@ -140,7 +140,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `conformance.rs` | Four common scenarios registered for both vLLM and SGLang; active cancellation, consumer drop and peer teardown initially enrolled for vLLM; vLLM request/logprob fields, admission rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
 | `cross_process.rs` | Registration and error recovery, readiness, startup failure/interruption, request isolation, SIGTERM withdrawal/drain; vLLM prefill/decode handoff through the real router | CPU, ordinary pre-merge Cargo tests |
-| `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer between engines | GPU, post-merge and nightly via pytest |
+| `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer between engines | GPU, post-merge only via pytest |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 SGLang currently registers the four baseline scenarios. Its process and active
@@ -220,9 +220,11 @@ cargo test --locked -p dynamo-sidecar-testkit --test cross_process
 
 ### Running native GPU integration tests
 
-Use the repository's vLLM test image and its pinned engine version. The launcher
-checks that the Python vLLM package and bundled `vllm-rs` versions agree. Model
-weights for `Qwen/Qwen3-0.6B` must already be cached. Compatibility and cancellation
+The GPU suite runs post-merge, separately from E2E, using the same vLLM test image,
+pinned engine version, GPU runners and shared pytest setup as the sidecar E2E
+tests. It uses the same `predownload_models` fixture to prepare
+`Qwen/Qwen3-0.6B` before starting an engine. The launcher checks that the Python
+vLLM package and bundled `vllm-rs` versions agree. Compatibility and cancellation
 need one GPU; handoff is scheduled on two GPUs. The launcher assigns each engine
 its GPU and dynamically allocated ports.
 
@@ -238,8 +240,12 @@ python3 -m pytest tests/sidecar/test_native_integration.py -v
 ```
 
 For a one-GPU host, add `-k 'not handoff'`. Set `SIDECAR_NATIVE_MODEL_PATH` to an
-existing local model directory when needed. CI builds/uploads the executable in
+existing local model directory when needed. For offline runs, also pass
+`--models-dir /path/to/hf_cache` with a populated cache to skip downloads.
+CI builds/uploads the executable in
 `shared-sidecar-tests.yml`, and the pytest job downloads it before starting the
-engines. The `native-tests` Cargo feature only enables this explicit GPU target;
-it is not needed for CPU tests. Do not interpret a pre-merge CPU pass as native
+engines through the same `shared-test.yml` workflow used by sidecar E2E. The extra
+CPU build produces a Rust test executable, not a separate runtime image. The
+`native-tests` Cargo feature only enables this explicit GPU target; it is not
+enabled by pre-merge Cargo tests. Do not interpret a pre-merge CPU pass as native
 GPU validation.
