@@ -151,7 +151,7 @@ The native tests retain their own purpose: a Mocker cannot prove that real vLLM
 accepts the serialized request, executes a structured-output constraint, releases
 its real scheduler work, or transfers GPU KV cache through NIXL. CPU handoff
 checks the routing and opaque metadata contract. Native handoff separately
-requires completed transfer bytes and compares output with local inference.
+requires completed transfer bytes and checks decode output length and token usage.
 Neither check establishes migration or cancellation during an actual transfer.
 
 Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
