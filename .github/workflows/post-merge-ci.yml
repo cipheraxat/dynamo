@@ -473,6 +473,15 @@ jobs:
   # TEST JOBS
   # ============================================================================
 
+  sidecar-native-test:
+    name: vllm-sidecar native integration
+    needs: [vllm-build]
+    uses: $/.github/workflows/shared-sidecar-tests.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      dd_env: post-merge
+    secrets: inherit
+
   sidecar-vllm-test:
     name: sidecar-runtime
     needs: [vllm-build, sidecar-build]
@@ -491,7 +500,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and vllm and gpu_{0} and not sidecar_native', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -1732,7 +1741,7 @@ jobs:
 
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test]
+    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, sidecar-native-test]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
