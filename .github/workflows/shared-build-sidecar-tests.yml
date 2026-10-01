@@ -1,20 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Sidecar native integration
+name: Build sidecar native tests
 
 on:
   workflow_call:
-    inputs:
-      target_tag_plain:
-        type: string
-        required: true
-      image_tag_suffix:
-        type: string
-        default: ''
-      dd_env:
-        type: string
-        required: true
+    outputs:
+      binary_artifact:
+        description: 'Artifact containing the native integration test executable'
+        value: ${{ jobs.build-native.outputs.binary_artifact }}
 
 jobs:
   build-native:
@@ -24,6 +18,8 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+    outputs:
+      binary_artifact: ${{ steps.build.outputs.binary_artifact }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -45,6 +41,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Build native compatibility executable
+        id: build
         shell: bash
         run: |
           set -euo pipefail
@@ -55,32 +52,10 @@ jobs:
           ' "${RUNNER_TEMP}/sidecar-native-build.jsonl")
           mkdir -p "${RUNNER_TEMP}/sidecar-native"
           strip -o "${RUNNER_TEMP}/sidecar-native/native_engine" "$executable"
+          echo "binary_artifact=sidecar-native-${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: sidecar-native-${{ github.sha }}
+          name: ${{ steps.build.outputs.binary_artifact }}
           path: ${{ runner.temp }}/sidecar-native/native_engine
           if-no-files-found: error
           retention-days: 7
-
-  native:
-    name: vLLM native cancellation and KV transfer
-    needs: build-native
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sidecar-native
-      framework: vllm
-      test_type: Native integration
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ inputs.target_tag_plain }}
-      source_ref: ${{ github.sha }}
-      image_tag_suffix: ${{ inputs.image_tag_suffix }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: (post_merge or nightly) and sidecar_native
-      gpu_test_timeout_minutes: 30
-      dd_env: ${{ inputs.dd_env }}
-      dd_flaky_retry_enabled: 'false'
-      sidecar_native_artifact: sidecar-native-${{ github.sha }}
-    secrets: inherit
