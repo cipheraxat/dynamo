@@ -71,34 +71,6 @@ fn preparation_is_deterministic() {
 }
 
 #[test]
-fn stop_token_planning_respects_the_minimum_and_length_boundary() {
-    let config = MockerServerConfig::default();
-    let baseline = PreparedRequest::new(request("stop-boundaries"), &config, 4).unwrap();
-    let stop_token = baseline.output_token(1);
-    for (minimum, expected_reason) in [
-        (0, pb::finish_info::FinishReason::Stop),
-        (2, pb::finish_info::FinishReason::Length),
-    ] {
-        let mut input = request("stop-boundaries");
-        let stopping = input.stopping.as_mut().unwrap();
-        stopping.min_new_tokens = minimum;
-        stopping.stop_token_ids = vec![stop_token];
-        stopping.ignore_eos = true;
-        let prepared = PreparedRequest::new(input, &config, 4).unwrap();
-        assert_eq!(prepared.max_output_tokens, 2);
-        let finish = prepared
-            .sequence_output(&[stop_token], true)
-            .finish_info
-            .unwrap();
-        assert_eq!(finish.finish_reason, expected_reason as i32);
-        assert_eq!(
-            finish.stop_reason,
-            (minimum == 0).then_some(pb::finish_info::StopReason::StopTokenId(stop_token))
-        );
-    }
-}
-
-#[test]
 fn oversized_generation_is_rejected_before_token_planning() {
     let mut oversized = request("too-many-tokens");
     oversized.stopping.as_mut().unwrap().max_new_tokens = MAX_NEW_TOKENS + 1;

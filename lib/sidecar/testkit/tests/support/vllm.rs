@@ -8,9 +8,12 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
+use dynamo_backend_common::{
+    BackendError, DisaggregationMode, FinishReason, GenerateContext, PreprocessedRequest,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_mocker::common::protocols::EngineType;
+use dynamo_sidecar_testkit::assert::terminal;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -150,6 +153,8 @@ impl SidecarFixture for Fixture {
 }
 
 impl WireFixture for Fixture {
+    const HAS_STOP_TOKENS_WITH_IGNORE_EOS: bool = true;
+
     fn assert_stream(
         handle: &RequestHandle<Adapter>,
         request: &PreprocessedRequest,
@@ -300,6 +305,21 @@ impl WireFixture for Fixture {
             );
             assert_eq!(selected["rank"], prompt_info.ranks[index]);
         }
+    }
+
+    async fn abort(&self, _engine: &Self::Engine, ctx: GenerateContext) {
+        pb::control_client::ControlClient::connect(self.server.endpoint())
+            .await
+            .unwrap()
+            .abort(pb::AbortRequest {
+                request_ids: vec![ctx.id().to_owned()],
+            })
+            .await
+            .unwrap();
+    }
+
+    fn assert_aborted(outputs: Outputs, tokens: &[u32], prompt_tokens: u32) {
+        terminal(outputs, tokens, prompt_tokens, FinishReason::Cancelled);
     }
 
     async fn scheduler_active(&self) {

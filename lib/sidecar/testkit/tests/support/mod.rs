@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use dynamo_backend_common::{BackendError, DisaggregationMode, LLMEngine, PreprocessedRequest};
+use dynamo_backend_common::{
+    BackendError, DisaggregationMode, GenerateContext, LLMEngine, PreprocessedRequest,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
 use dynamo_mocker::scheduler::MockerMetrics;
@@ -53,11 +55,15 @@ pub trait SidecarFixture {
 }
 
 pub trait WireFixture: SidecarFixture {
+    const HAS_STOP_TOKENS_WITH_IGNORE_EOS: bool;
+
     fn assert_stream(
         handle: &RequestHandle<Self::Protocol>,
         request: &PreprocessedRequest,
         outputs: &Outputs,
     );
+    async fn abort(&self, engine: &Self::Engine, ctx: GenerateContext);
+    fn assert_aborted(outputs: Outputs, tokens: &[u32], prompt_tokens: u32);
     async fn scheduler_active(&self);
 }
 

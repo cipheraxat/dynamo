@@ -6,7 +6,7 @@ use tonic_v14 as tonic;
 
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
@@ -139,47 +139,6 @@ async fn collect(
         .map(|item| item.unwrap())
         .collect()
         .await
-}
-
-#[tokio::test]
-async fn sidecar_receives_explicit_stop_reason_and_shortened_usage() {
-    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    engine.start(0).await.unwrap();
-    let context = dynamo_backend_common::testing::mock_context();
-    let baseline: Vec<_> = engine
-        .generate(request(4), GenerateContext::new(context.clone(), None))
-        .await
-        .unwrap()
-        .map(|item| item.unwrap())
-        .collect()
-        .await;
-    let stop_token = baseline[0].token_ids[0];
-    let mut input = request(4);
-    input.stop_conditions.stop_token_ids = Some(vec![stop_token]);
-    let outputs: Vec<_> = engine
-        .generate(input, GenerateContext::new(context, None))
-        .await
-        .unwrap()
-        .map(|item| item.unwrap())
-        .collect()
-        .await;
-    assert_eq!(outputs.len(), 1);
-    let terminal = outputs.last().unwrap();
-    assert_eq!(terminal.token_ids, vec![stop_token]);
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
-    assert_eq!(
-        terminal.stop_reason,
-        Some(StopReason::Int(i64::from(stop_token)))
-    );
-    assert_eq!(
-        terminal
-            .completion_usage
-            .as_ref()
-            .unwrap()
-            .completion_tokens,
-        1
-    );
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@
 use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
     BackendError, DynamoError, FinishReason, GenerateContext, LLMEngine, LLMEngineOutput,
+    PreprocessedRequest, StopReason,
 };
 use dynamo_sidecar_testkit::assert::{failure, terminal};
 use dynamo_sidecar_testkit::bounded;
@@ -137,6 +138,68 @@ async fn streaming<F: SidecarFixture>() {
     finish(&mut fixture, &engine).await;
 }
 
+async fn stop_request<F: SidecarFixture>(
+    req: PreprocessedRequest,
+    ctx: GenerateContext,
+) -> (Outputs, Vec<u32>) {
+    // A fresh controller permits the same ID to reproduce the baseline's synthetic tokens.
+    let control = Controller::<F::Protocol>::default();
+    let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    let outputs = collect(&engine, req, ctx).await;
+    bounded("stopped request drop", handle.wait(Event::Dropped)).await;
+    fixture.scheduler_idle().await;
+    finish(&mut fixture, &engine).await;
+    (outputs, handle.tokens())
+}
+
+async fn stop_tokens<F: WireFixture>() {
+    let ctx = mock_context();
+    let mut input = request("mocker-model", vec![11, 22, 33, 44], 4);
+    input.output_options.logprobs = Some(2);
+    input.output_options.prompt_logprobs = Some(1);
+    let (baseline, tokens) =
+        stop_request::<F>(input.clone(), GenerateContext::new(ctx.clone(), None)).await;
+    assert_eq!(tokens.len(), 4);
+    terminal(baseline, &tokens, 4, FinishReason::Length);
+    let stop_token = tokens[0];
+    let ignore_eos_finish = if F::HAS_STOP_TOKENS_WITH_IGNORE_EOS {
+        FinishReason::Stop
+    } else {
+        FinishReason::Length
+    };
+    let ignore_eos_tokens = if F::HAS_STOP_TOKENS_WITH_IGNORE_EOS {
+        1
+    } else {
+        4
+    };
+    for (maximum, minimum, is_ignore_eos, expected_count, expected_finish) in [
+        (4, 0, false, 1, FinishReason::Stop),
+        (1, 0, false, 1, FinishReason::Stop),
+        (4, 4, false, 4, FinishReason::Length),
+        (4, 0, true, ignore_eos_tokens, ignore_eos_finish.clone()),
+        (1, 0, true, 1, ignore_eos_finish),
+        (1, 1, true, 1, FinishReason::Length),
+    ] {
+        let mut req = input.clone();
+        req.stop_conditions.max_tokens = Some(maximum);
+        req.stop_conditions.min_tokens = Some(minimum);
+        req.stop_conditions.ignore_eos = Some(is_ignore_eos);
+        req.stop_conditions.stop_token_ids = Some(vec![stop_token]);
+        let (outputs, native_tokens) =
+            stop_request::<F>(req, GenerateContext::new(ctx.clone(), None)).await;
+        assert_eq!(native_tokens, tokens[..expected_count]);
+        assert_eq!(
+            outputs.last().unwrap().as_ref().unwrap().stop_reason,
+            (expected_finish == FinishReason::Stop)
+                .then_some(StopReason::Int(i64::from(stop_token)))
+        );
+        terminal(outputs, &native_tokens, 4, expected_finish);
+    }
+}
+
 async fn failures<F: SidecarFixture>() {
     let control = Controller::<F::Protocol>::default();
     let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
@@ -262,6 +325,7 @@ async fn cancellation<F: SidecarFixture>() {
 #[derive(Clone, Copy)]
 enum Cancellation {
     Explicit,
+    NativeAbort,
     ConsumerDrop,
 }
 
@@ -298,6 +362,7 @@ async fn read_isolation<F: SidecarFixture>(
     assert!(poll!(stream_b.next()).is_pending());
 
     match cancellation {
+        Cancellation::NativeAbort => unreachable!("native Abort uses the active-work scenario"),
         Cancellation::ConsumerDrop => drop(stream_a),
         Cancellation::Explicit => {
             ctx_a.stop_generating();
@@ -406,20 +471,41 @@ async fn active_work<F: WireFixture>(cancellation: Cancellation) {
     let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
     let tokens = handle.tokens();
     fixture.scheduler_active().await;
-    if matches!(cancellation, Cancellation::Explicit) {
-        ctx.stop_generating();
-        outputs.extend(
+    match cancellation {
+        Cancellation::Explicit => {
+            ctx.stop_generating();
+            outputs.extend(
+                bounded(
+                    "active cancellation terminal",
+                    stream.by_ref().collect::<Outputs>(),
+                )
+                .await,
+            );
+            terminal(outputs, &tokens, 3, FinishReason::Cancelled);
+        }
+        Cancellation::NativeAbort => {
             bounded(
-                "active cancellation terminal",
-                stream.by_ref().collect::<Outputs>(),
+                "native Abort RPC",
+                fixture.abort(&engine, GenerateContext::new(ctx, None)),
             )
-            .await,
-        );
-        terminal(outputs, &tokens, 3, FinishReason::Cancelled);
+            .await;
+            handle.release();
+            outputs.extend(
+                bounded(
+                    "native Abort response",
+                    stream.by_ref().collect::<Outputs>(),
+                )
+                .await,
+            );
+            F::assert_aborted(outputs, &handle.tokens(), 3);
+        }
+        Cancellation::ConsumerDrop => {}
     }
     drop(stream);
     bounded("active request remote drop", handle.wait(Event::Dropped)).await;
-    assert_eq!(handle.tokens(), tokens);
+    if !matches!(cancellation, Cancellation::NativeAbort) {
+        assert_eq!(handle.tokens(), tokens);
+    }
     fixture.scheduler_idle().await;
     healthy(&fixture, &engine, &control).await;
     if matches!(cancellation, Cancellation::ConsumerDrop) {
@@ -477,6 +563,11 @@ macro_rules! enroll_baseline {
             }
 
             #[tokio::test]
+            async fn stop_tokens_preserve_reason_limits_and_usage() {
+                bounded("stop token conformance", stop_tokens::<$fixture>()).await;
+            }
+
+            #[tokio::test]
             async fn open_failure_early_eof_and_read_failure() {
                 bounded("failure conformance", failures::<$fixture>()).await;
             }
@@ -496,6 +587,15 @@ macro_rules! enroll_baseline {
                 bounded(
                     "active cancellation and recovery",
                     active_work::<$fixture>(Cancellation::Explicit),
+                )
+                .await;
+            }
+
+            #[tokio::test]
+            async fn native_abort_terminates_stream_and_releases_scheduler_work() {
+                bounded(
+                    "native Abort and recovery",
+                    active_work::<$fixture>(Cancellation::NativeAbort),
                 )
                 .await;
             }

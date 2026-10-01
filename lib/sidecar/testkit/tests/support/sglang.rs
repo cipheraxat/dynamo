@@ -5,7 +5,9 @@ use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
+use dynamo_backend_common::{
+    BackendError, DisaggregationMode, GenerateContext, LLMEngine, PreprocessedRequest,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_mocker::common::protocols::EngineType;
@@ -15,6 +17,7 @@ use dynamo_sglang_sidecar::proto::{
     self as pb,
     sglang_service_server::{SglangService, SglangServiceServer},
 };
+use dynamo_sidecar_testkit::assert::failure;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -177,6 +180,8 @@ impl SidecarFixture for Fixture {
 }
 
 impl WireFixture for Fixture {
+    const HAS_STOP_TOKENS_WITH_IGNORE_EOS: bool = false;
+
     fn assert_stream(
         handle: &RequestHandle<Adapter>,
         request: &PreprocessedRequest,
@@ -327,6 +332,14 @@ impl WireFixture for Fixture {
                 assert_eq!(prompts[index][token]["logprob"], entry[0]);
             }
         }
+    }
+
+    async fn abort(&self, engine: &Self::Engine, ctx: GenerateContext) {
+        engine.abort(ctx.inner_arc()).await;
+    }
+
+    fn assert_aborted(outputs: Outputs, tokens: &[u32], _prompt_tokens: u32) {
+        failure(outputs, tokens, BackendError::Cancelled);
     }
 
     async fn scheduler_active(&self) {
