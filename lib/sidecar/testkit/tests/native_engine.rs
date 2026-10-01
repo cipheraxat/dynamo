@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    BootstrapInfo, DisaggregationMode, EngineConfig, FinishReason, GenerateContext,
-    GuidedDecodingOptions, LLMEngine, PrefillResult, PreprocessedRequest, testing::mock_context,
+    BackendError, BootstrapInfo, DisaggregationMode, EngineConfig, ErrorType, FinishReason,
+    GenerateContext, GuidedDecodingOptions, LLMEngine, PrefillResult, PreprocessedRequest,
+    testing::mock_context,
 };
 use dynamo_sglang_sidecar::SglangSidecarEngine;
 use dynamo_sidecar_testkit::{bounded, fixtures};
@@ -292,6 +293,12 @@ async fn native_logprobs_and_structured_output_are_compatible(backend: Backend) 
 }
 
 async fn cancellation_and_consumer_drop_release_native_work(backend: Backend) {
+    enum Cancellation {
+        Context,
+        Abort,
+        Drop,
+    }
+
     tokio::time::timeout(Duration::from_secs(90), async {
         let engine = engine(
             backend,
@@ -300,7 +307,11 @@ async fn cancellation_and_consumer_drop_release_native_work(backend: Backend) {
         )
         .await;
         recovery(engine.as_ref()).await;
-        for explicit in [true, false] {
+        for cancellation in [
+            Cancellation::Context,
+            Cancellation::Abort,
+            Cancellation::Drop,
+        ] {
             scheduler(backend, false).await;
             let context = mock_context();
             let mut stream = engine
@@ -314,7 +325,7 @@ async fn cancellation_and_consumer_drop_release_native_work(backend: Backend) {
             assert!(!first.token_ids.is_empty());
             assert_eq!(first.finish_reason, None);
             scheduler(backend, true).await;
-            if explicit {
+            if matches!(cancellation, Cancellation::Context) {
                 context.stop_generating();
                 let terminal = bounded("native cancellation", stream.next())
                     .await
@@ -326,6 +337,58 @@ async fn cancellation_and_consumer_drop_release_native_work(backend: Backend) {
                         .await
                         .is_none()
                 );
+            } else if matches!(cancellation, Cancellation::Abort) {
+                bounded("native Abort RPC", async {
+                    let endpoint = required("SIDECAR_NATIVE_GRPC");
+                    let request_id = context.id().to_string();
+                    match backend {
+                        Backend::Vllm => {
+                            use dynamo_vllm_sidecar::proto::{
+                                AbortRequest, control_client::ControlClient,
+                            };
+                            ControlClient::connect(endpoint)
+                                .await
+                                .unwrap()
+                                .abort(AbortRequest {
+                                    request_ids: vec![request_id],
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        Backend::Sglang => {
+                            use dynamo_sglang_sidecar::proto::{
+                                AbortRequest, sglang_service_client::SglangServiceClient,
+                            };
+                            let response = SglangServiceClient::connect(endpoint)
+                                .await
+                                .unwrap()
+                                .abort(AbortRequest {
+                                    rid: request_id,
+                                    abort_all: false,
+                                })
+                                .await
+                                .unwrap()
+                                .into_inner();
+                            assert!(response.success);
+                        }
+                    }
+                })
+                .await;
+                let outputs =
+                    bounded("native Abort response", stream.by_ref().collect::<Vec<_>>()).await;
+                match backend {
+                    Backend::Vllm => {
+                        assert!(outputs.iter().all(Result::is_ok));
+                        assert_eq!(
+                            outputs.last().unwrap().as_ref().unwrap().finish_reason,
+                            Some(FinishReason::Cancelled),
+                        );
+                    }
+                    Backend::Sglang => assert_eq!(
+                        outputs.last().unwrap().as_ref().unwrap_err().error_type(),
+                        ErrorType::Backend(BackendError::Cancelled),
+                    ),
+                }
             }
             drop(stream);
             scheduler(backend, false).await;

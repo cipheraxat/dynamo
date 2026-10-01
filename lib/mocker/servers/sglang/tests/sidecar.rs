@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, FinishReason, GenerateContext, LLMEngine,
-    OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
+    AsyncEngineContext, BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext,
+    LLMEngine, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
+    StopReason,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
@@ -192,6 +193,56 @@ async fn sidecar_streams_incremental_mocker_tokens_logprobs_and_usage() {
 }
 
 #[tokio::test]
+async fn sidecar_preserves_sglang_stop_token_controls() {
+    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    let context = dynamo_backend_common::testing::mock_context();
+    let baseline = collect_with_context(&engine, request(4), Arc::clone(&context)).await;
+    let baseline_tokens: Vec<_> = baseline
+        .iter()
+        .flat_map(|output| &output.token_ids)
+        .copied()
+        .collect();
+    let stop_token = baseline_tokens[0];
+
+    for (max_tokens, min_tokens, is_ignore_eos, expected_tokens, expected_finish) in [
+        (4, 0, false, 1, FinishReason::Stop),
+        (1, 0, false, 1, FinishReason::Stop),
+        (4, 4, false, 4, FinishReason::Length),
+        (4, 0, true, 4, FinishReason::Length),
+    ] {
+        let mut stopped = request(max_tokens);
+        stopped.stop_conditions.min_tokens = Some(min_tokens);
+        stopped.stop_conditions.ignore_eos = Some(is_ignore_eos);
+        stopped.stop_conditions.stop_token_ids = Some(vec![stop_token]);
+        let outputs = collect_with_context(&engine, stopped, Arc::clone(&context)).await;
+        let tokens: Vec<_> = outputs
+            .iter()
+            .flat_map(|output| &output.token_ids)
+            .copied()
+            .collect();
+        assert_eq!(tokens, baseline_tokens[..expected_tokens]);
+        let terminal = outputs.last().unwrap();
+        assert_eq!(terminal.finish_reason.as_ref(), Some(&expected_finish));
+        assert_eq!(
+            terminal.stop_reason,
+            (expected_finish == FinishReason::Stop)
+                .then_some(StopReason::Int(i64::from(stop_token)))
+        );
+        assert_eq!(
+            terminal
+                .completion_usage
+                .as_ref()
+                .unwrap()
+                .completion_tokens as usize,
+            expected_tokens
+        );
+        assert_eq!(server.service.active_request_count(), 0);
+    }
+}
+
+#[tokio::test]
 async fn prefill_handoff_round_trips_through_a_decode_server() {
     let prefill_server = RunningServer::start(ServerMode::Prefill, fast_engine_args()).await;
     let decode_server = RunningServer::start(ServerMode::Decode, fast_engine_args()).await;
@@ -269,7 +320,14 @@ async fn sidecar_abort_releases_mocker_work() {
     })
     .await
     .expect("Abort should release scheduler work promptly");
-    consumer.abort();
+    let outputs = tokio::time::timeout(std::time::Duration::from_secs(2), consumer)
+        .await
+        .expect("Abort should terminate the gRPC response stream")
+        .unwrap();
+    assert_eq!(
+        outputs.last().unwrap().as_ref().unwrap_err().error_type(),
+        ErrorType::Backend(BackendError::Cancelled)
+    );
 }
 
 #[tokio::test]

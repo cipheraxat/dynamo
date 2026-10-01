@@ -6,7 +6,7 @@ use tonic_v14 as tonic;
 
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, StopConditions,
+    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
@@ -142,6 +142,47 @@ async fn collect(
 }
 
 #[tokio::test]
+async fn sidecar_receives_explicit_stop_reason_and_shortened_usage() {
+    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    let context = dynamo_backend_common::testing::mock_context();
+    let baseline: Vec<_> = engine
+        .generate(request(4), GenerateContext::new(context.clone(), None))
+        .await
+        .unwrap()
+        .map(|item| item.unwrap())
+        .collect()
+        .await;
+    let stop_token = baseline[0].token_ids[0];
+    let mut input = request(4);
+    input.stop_conditions.stop_token_ids = Some(vec![stop_token]);
+    let outputs: Vec<_> = engine
+        .generate(input, GenerateContext::new(context, None))
+        .await
+        .unwrap()
+        .map(|item| item.unwrap())
+        .collect()
+        .await;
+    assert_eq!(outputs.len(), 1);
+    let terminal = outputs.last().unwrap();
+    assert_eq!(terminal.token_ids, vec![stop_token]);
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(
+        terminal.stop_reason,
+        Some(StopReason::Int(i64::from(stop_token)))
+    );
+    assert_eq!(
+        terminal
+            .completion_usage
+            .as_ref()
+            .unwrap()
+            .completion_tokens,
+        1
+    );
+}
+
+#[tokio::test]
 async fn prefill_handoff_round_trips_through_a_decode_server() {
     let prefill_server = RunningServer::start(ServerMode::Prefill, fast_engine_args()).await;
     let decode_server = RunningServer::start(ServerMode::Decode, fast_engine_args()).await;
@@ -150,7 +191,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     prefill.start(0).await.unwrap();
     decode.start(1).await.unwrap();
 
-    let prefill_outputs = collect(&prefill, request(3)).await;
+    let mut prefill_request = request(3);
+    prefill_request.token_ids = vec![11, 22, 33, 44, 55].into();
+    let prefill_outputs = collect(&prefill, prefill_request.clone()).await;
     assert_eq!(prefill_outputs.len(), 1);
     assert!(prefill_outputs[0].token_ids.is_empty());
     let handoff = prefill_outputs[0]
@@ -159,6 +202,12 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         .expect("prefill response should carry an opaque KV handoff");
     assert_eq!(handoff["do_remote_prefill"], true);
     assert!(handoff["remote_engine_id"].is_string());
+    assert!(handoff["remote_request_id"].is_string());
+    let groups = handoff["remote_block_ids"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    let blocks = groups[0].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks.iter().all(|block| block.as_u64().is_some()));
     // The non-rendezvous sentinel proves the sidecar preserved opaque handoff
     // fields rather than reconstructing only the keys it recognizes.
     assert!(
@@ -166,7 +215,7 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         "sidecar must forward opaque KV-transfer fields verbatim"
     );
 
-    let mut decode_request = request(3);
+    let mut decode_request = prefill_request;
     decode_request.prefill_result = Some(PrefillResult {
         disaggregated_params: handoff,
         prompt_tokens_details: None,
