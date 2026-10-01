@@ -9,24 +9,34 @@ Unit tests live beside the production code they exercise. They construct inputs,
 call the real parsing, conversion or state-management functions, and check the
 results without starting an inference engine. Common behavior is tested in the
 common crate; vLLM behavior is tested in the vLLM crate. There is no shared unit
-scenario or backend-adapter layer.
+scenario or backend-adapter layer. Shared CPU integration tests live in the testkit
+crate and connect real sidecars to local Mocker servers, which simulate engine
+responses without loading a model.
 
 ## File layout
 
 ```text
 lib/sidecar/
 ├── common/src/
-│   ├── endpoint.rs            # Inline tests: endpoint parsing and normalization
-│   ├── error.rs               # Inline tests: transport status mapping
-│   └── transport.rs           # Inline test: startup deadline during retries
+│   ├── args.rs                 # Inline tests: argument defaults and validation
+│   ├── endpoint.rs             # Inline tests: endpoint parsing and normalization
+│   ├── error.rs                # Inline tests: transport status mapping
+│   ├── json.rs                 # Inline tests: shared JSON/protobuf conversion
+│   ├── transport.rs            # Production policy and existing socket test
+│   └── transport/tests.rs      # Retry/pool policy using paused time, no sockets
 ├── vllm/src/
-│   ├── model.rs               # Inline test: local data-parallel ownership
-│   ├── engine.rs              # Inline test: routing-configuration deadline
-│   ├── json.rs                # Inline tests: JSON/protobuf conversion
-│   ├── convert.rs             # Inline test: full-vocabulary logprobs
-│   └── tests.rs               # Conversion tests and local fake-gRPC scenarios
+│   ├── model.rs                # Inline tests: discovery metadata and configuration
+│   ├── engine.rs               # Inline tests: worker configuration and local lifecycle
+│   ├── lora.rs                 # Inline tests: adapter validation, identity and locking
+│   ├── convert.rs              # Production conversion and child-module declarations
+│   ├── convert/
+│   │   ├── request_tests.rs    # Request fields, validation, routing and handoffs
+│   │   └── response_tests.rs   # Stream conversion, logprobs, stops and usage
+│   ├── test_fixtures.rs        # Native request, response and metadata builders
+│   └── tests.rs                # Broader tests using a local fake gRPC server
 └── testkit/
     ├── src/
+    │   ├── lib.rs              # Bounded waits and public testkit exports
     │   ├── control.rs          # Per-request controls, observations and controller test
     │   ├── server.rs           # Local server lifetime, including abrupt shutdown
     │   ├── fixtures.rs         # Shared request construction and stream collection
@@ -44,11 +54,26 @@ lib/sidecar/
     └── README.md              # This guide
 ```
 
-Small suites use inline child modules marked `#[cfg(test)]` in their production
-module.
-The larger `vllm/src/tests.rs` suite is declared from `vllm/src/lib.rs` and
-contains both direct conversion checks and scenarios using a local fake gRPC
-server. Both styles compile into their crate's library test binary.
+Small suites use an inline `#[cfg(test)] mod tests` in their production module.
+The larger request and response suites are separate files, declared in
+`vllm/src/convert.rs`:
+
+```rust
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;
+```
+
+These are still child modules of `convert`, so `use super::*` gives them access
+to its private functions. A separate test file does not require making
+production functions public.
+
+Common's `transport/tests.rs` is registered once from `common/src/lib.rs` using
+`#[path = "transport/tests.rs"] mod transport_tests`. The production transport
+source is also included for a second Tonic version; registering these policy
+tests at the crate root avoids running them twice. The existing socket test
+inside `transport.rs` remains with each transport implementation.
 
 The testkit library owns request controls, bounded waits, stream collection,
 assertions and server lifetime. Concrete sidecars, Mockers and protocol libraries
@@ -64,33 +89,39 @@ out of ordinary CPU test runs while allowing a compile-only check.
 
 ## Adding a unit test
 
-Add the test to its production module's existing test child module, or extend the
-existing `vllm/src/tests.rs` suite when it already owns the relevant setup.
-Use ordinary `#[test]` or `#[tokio::test]` attributes. Call the actual production
-helper and assert the behavior being protected. Keep setup local unless several
-tests need the same builder; a private helper does not need to become public
-just to be tested from a child module.
+Add the test to its production module's `tests` child module, or to the existing
+request/response test file. Use ordinary `#[test]` or `#[tokio::test]`
+attributes. Call the actual production helper and assert the behavior being
+protected. Keep setup local unless several tests need the same builder.
 
-Common parsing and transport behavior belongs in the common crate. A backend's
-request fields, conversion and local state belong beside that backend's
-implementation. Reserve the shared integration scenarios for contracts that
-cross the native RPC or process boundary.
+Reusable vLLM inputs belong in `vllm/src/test_fixtures.rs`, which is compiled
+only for tests. It contains plain functions for requests, model/server metadata,
+responses and cache handoffs. Both the isolated units and the broader
+`vllm/src/tests.rs` suite use them. Helpers used by only one suite can stay in
+that suite. Tests for another backend should use that backend's production
+modules and native fixtures.
+
+The broader `vllm/src/tests.rs` exercises connections, RPCs, discovery,
+cancellation and administration against a local fake server. It remains
+separate because these checks cover interactions across modules, while the
+isolated tests call functions directly. Both are compiled into the library's
+test binary.
 
 ## Running tests
 
-From the repository root, run common and vLLM library tests, their local-server
-tests, and the testkit controller regression:
+From the repository root, run all common and vLLM library tests, including their
+local-server tests and the testkit controller regression:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
   -p dynamo-sidecar-testkit --lib
 ```
 
-Run one conversion test by its full name:
+Run one request-conversion test by its full name:
 
 ```sh
 cargo test --locked -p dynamo-vllm-sidecar --lib \
-  convert::candidate_tests::full_vocabulary_logprobs_select_all_candidates -- --exact
+  convert::request_tests::canonical_priority_preserves_native_ordering -- --exact
 ```
 
 The vLLM dependency enables common's `tonic-v14` feature. To cover that version
