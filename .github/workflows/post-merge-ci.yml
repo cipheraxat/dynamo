@@ -526,7 +526,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and sglang and gpu_{0} and not sidecar_native', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}

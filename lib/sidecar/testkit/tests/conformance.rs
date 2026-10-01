@@ -189,14 +189,7 @@ async fn failures<F: SidecarFixture>() {
 
 async fn cancellation<F: SidecarFixture>() {
     let control = Controller::<F::Protocol>::default();
-    let mut fixture = F::start(
-        control.clone(),
-        FixtureConfig {
-            connections: 2,
-            ..Default::default()
-        },
-    )
-    .await;
+    let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
 

@@ -217,6 +217,22 @@ impl Process {
         } else {
             command.args(["--grpc-endpoint", endpoint]);
         }
+        #[cfg(target_os = "linux")]
+        {
+            let parent_pid = std::process::id() as libc::pid_t;
+            // SAFETY: the post-fork callback only uses syscalls and constructs an errno value.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::getppid() != parent_pid {
+                        libc::_exit(1);
+                    }
+                    Ok(())
+                });
+            }
+        }
         let child = command
             .args([
                 "--grpc-connections",

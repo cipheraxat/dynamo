@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.managed_process import ManagedProcess
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -26,6 +27,7 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.post_merge,
     pytest.mark.nightly,
+    pytest.mark.gpu_1,
     pytest.mark.model(MODEL),
     pytest.mark.timeout(900),
 ]
@@ -40,7 +42,6 @@ pytestmark = [
             engines,
             marks=[
                 getattr(pytest.mark, backend),
-                getattr(pytest.mark, f"gpu_{1 if backend == 'sglang' else engines}"),
                 pytest.mark.requested_vllm_kv_cache_bytes(1119388000)
                 if backend == "vllm"
                 else pytest.mark.requested_sglang_kv_tokens(8192 * engines),
@@ -65,7 +66,9 @@ pytestmark = [
     ],
 )
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_native_integration(backend, scenario, engines, tmp_path, dynamo_dynamic_ports):
+def test_native_integration(
+    backend, scenario, engines, tmp_path, dynamo_dynamic_ports, predownload_models
+):
     binary = Path(os.environ["DYNAMO_SIDECAR_NATIVE_TEST"])
     assert binary.is_file(), f"Missing compiled native_engine test: {binary}"
     native = None
@@ -86,14 +89,7 @@ def test_native_integration(backend, scenario, engines, tmp_path, dynamo_dynamic
         assert version == f"vllm-rs {package_version('vllm')}", version
     else:
         assert package_version("sglang") == "0.5.19"
-    gpu_ids = os.environ.get(
-        "SIDECAR_NATIVE_GPUS", os.environ.get("CUDA_VISIBLE_DEVICES", "0,1")
-    ).split(",")
-    if backend == "sglang":
-        gpu_ids = [gpu_ids[0]] * engines
-    assert len(gpu_ids) >= engines and all(
-        gpu_ids
-    ), "Insufficient assigned GPUs for native integration"
+    gpu_id = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
     probe = tmp_path / "transfers.jsonl"
     probe.write_text("")
     model = os.environ.get("SIDECAR_NATIVE_MODEL_PATH", MODEL)
@@ -195,7 +191,7 @@ def test_native_integration(backend, scenario, engines, tmp_path, dynamo_dynamic
                     ]
             env = dict(
                 environment,
-                CUDA_VISIBLE_DEVICES=gpu_ids[index],
+                CUDA_VISIBLE_DEVICES=gpu_id,
                 VLLM_NIXL_SIDE_CHANNEL_PORT=str(nixl_port),
                 VLLM_PLUGINS="",
                 PYTHONPATH=os.pathsep.join(

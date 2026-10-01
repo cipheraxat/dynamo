@@ -9,24 +9,34 @@ Unit tests live beside the production code they exercise. They construct inputs,
 call the real parsing, conversion or state-management functions, and check the
 results without starting an inference engine. Common behavior is tested in the
 common crate; vLLM behavior is tested in the vLLM crate. There is no shared unit
-scenario or backend-adapter layer.
+scenario or backend-adapter layer. Shared CPU integration tests live in the testkit
+crate and connect real sidecars to local Mocker servers, which simulate engine
+responses without loading a model.
 
 ## File layout
 
 ```text
 lib/sidecar/
 ├── common/src/
-│   ├── endpoint.rs            # Inline tests: endpoint parsing and normalization
-│   ├── error.rs               # Inline tests: transport status mapping
-│   └── transport.rs           # Inline test: startup deadline during retries
+│   ├── args.rs                 # Inline tests: argument defaults and validation
+│   ├── endpoint.rs             # Inline tests: endpoint parsing and normalization
+│   ├── error.rs                # Inline tests: transport status mapping
+│   ├── json.rs                 # Inline tests: shared JSON/protobuf conversion
+│   ├── transport.rs            # Production policy and existing socket test
+│   └── transport/tests.rs      # Retry/pool policy using paused time, no sockets
 ├── vllm/src/
-│   ├── model.rs               # Inline test: local data-parallel ownership
-│   ├── engine.rs              # Inline test: routing-configuration deadline
-│   ├── json.rs                # Inline tests: JSON/protobuf conversion
-│   ├── convert.rs             # Inline test: full-vocabulary logprobs
-│   └── tests.rs               # Conversion tests and local fake-gRPC scenarios
+│   ├── model.rs                # Inline tests: discovery metadata and configuration
+│   ├── engine.rs               # Inline tests: worker configuration and local lifecycle
+│   ├── lora.rs                 # Inline tests: adapter validation, identity and locking
+│   ├── convert.rs              # Production conversion and child-module declarations
+│   ├── convert/
+│   │   ├── request_tests.rs    # Request fields, validation, routing and handoffs
+│   │   └── response_tests.rs   # Stream conversion, logprobs, stops and usage
+│   ├── test_fixtures.rs        # Native request, response and metadata builders
+│   └── tests.rs                # Broader tests using a local fake gRPC server
 └── testkit/
     ├── src/
+    │   ├── lib.rs              # Bounded waits and public testkit exports
     │   ├── control.rs          # Per-request controls, observations and controller test
     │   ├── server.rs           # Local server lifetime, including abrupt shutdown
     │   ├── fixtures.rs         # Shared request construction and stream collection
@@ -44,11 +54,26 @@ lib/sidecar/
     └── README.md              # This guide
 ```
 
-Small suites use inline child modules marked `#[cfg(test)]` in their production
-module.
-The larger `vllm/src/tests.rs` suite is declared from `vllm/src/lib.rs` and
-contains both direct conversion checks and scenarios using a local fake gRPC
-server. Both styles compile into their crate's library test binary.
+Small suites use an inline `#[cfg(test)] mod tests` in their production module.
+The larger request and response suites are separate files, declared in
+`vllm/src/convert.rs`:
+
+```rust
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;
+```
+
+These are still child modules of `convert`, so `use super::*` gives them access
+to its private functions. A separate test file does not require making
+production functions public.
+
+Common's `transport/tests.rs` is registered once from `common/src/lib.rs` using
+`#[path = "transport/tests.rs"] mod transport_tests`. The production transport
+source is also included for a second Tonic version; registering these policy
+tests at the crate root avoids running them twice. The existing socket test
+inside `transport.rs` remains with each transport implementation.
 
 The testkit library owns request controls, bounded waits, stream collection,
 assertions and server lifetime. Concrete sidecars, Mockers and protocol libraries
@@ -56,35 +81,47 @@ are development dependencies used by the integration tests. Production sidecars
 and Mockers do not depend on testkit. Backend fixtures live in `tests/support/`
 and are local to the integration suite, rather than a public fixture API.
 
+Each top-level Rust file in `testkit/tests/` builds a separate test executable.
+The two CPU files separate direct engine calls from child-process startup,
+discovery and shutdown, making each setup easier to follow and run independently.
+The separate `native_engine` target uses a Cargo feature to keep GPU execution
+out of ordinary CPU test runs while allowing a compile-only check.
+
 ## Adding a unit test
 
-Add the test to its production module's existing test child module, or extend the
-existing `vllm/src/tests.rs` suite when it already owns the relevant setup.
-Use ordinary `#[test]` or `#[tokio::test]` attributes. Call the actual production
-helper and assert the behavior being protected. Keep setup local unless several
-tests need the same builder; a private helper does not need to become public
-just to be tested from a child module.
+Add the test to its production module's `tests` child module, or to the existing
+request/response test file. Use ordinary `#[test]` or `#[tokio::test]`
+attributes. Call the actual production helper and assert the behavior being
+protected. Keep setup local unless several tests need the same builder.
 
-Common parsing and transport behavior belongs in the common crate. A backend's
-request fields, conversion and local state belong beside that backend's
-implementation. Reserve the shared integration scenarios for contracts that
-cross the native RPC or process boundary.
+Reusable vLLM inputs belong in `vllm/src/test_fixtures.rs`, which is compiled
+only for tests. It contains plain functions for requests, model/server metadata,
+responses and cache handoffs. Both the isolated units and the broader
+`vllm/src/tests.rs` suite use them. Helpers used by only one suite can stay in
+that suite. Tests for another backend should use that backend's production
+modules and native fixtures.
+
+The broader `vllm/src/tests.rs` exercises connections, RPCs, discovery,
+cancellation and administration against a local fake server. It remains
+separate because these checks cover interactions across modules, while the
+isolated tests call functions directly. Both are compiled into the library's
+test binary.
 
 ## Running tests
 
-From the repository root, run common and vLLM library tests, their local-server
-tests, and the testkit controller regression:
+From the repository root, run all common and vLLM library tests, including their
+local-server tests and the testkit controller regression:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
   -p dynamo-sidecar-testkit --lib
 ```
 
-Run one conversion test by its full name:
+Run one request-conversion test by its full name:
 
 ```sh
 cargo test --locked -p dynamo-vllm-sidecar --lib \
-  convert::candidate_tests::full_vocabulary_logprobs_select_all_candidates -- --exact
+  convert::request_tests::canonical_priority_preserves_native_ordering -- --exact
 ```
 
 The vLLM dependency enables common's `tonic-v14` feature. To cover that version
@@ -104,24 +141,16 @@ actual sidecar executable and use the production Worker, discovery and router.
 They create their own local tokenizer files, file-backed discovery and TCP
 connections; neither etcd nor NATS is required.
 
-```mermaid
-flowchart TD
-    U[Backend-local unit tests] --> C[Production conversion and lifecycle helpers]
-    W[conformance.rs: shared scenarios and backend assertions] --> F[Backend fixture]
-    F --> E[Production sidecar engine]
-    E -->|native gRPC| G[Per-request fault and observation controller]
-    G --> M[CPU Mocker scheduler]
-    P[cross_process.rs] --> D[Local discovery and TCP router]
-    D --> B[Sidecar child: production Worker and engine]
-    B -->|native gRPC| G
-    P --> R[Real PrefillRouter]
-    R --> B
-    N[pytest native launcher] --> T[native_engine.rs]
-    N --> V[Real vLLM or SGLang processes and model weights]
-    T --> E2[Production sidecar engine]
-    E2 -->|native gRPC| V
-    V --> K[GPU scheduler and native KV transfer]
-```
+Each suite exercises a different request path:
+
+- `conformance.rs` uses a backend fixture to call the production sidecar engine
+  library, which sends native gRPC requests to a CPU Mocker.
+- `cross_process.rs` uses local discovery to find sidecar child processes and
+  sends requests to them over TCP. Each sidecar calls a CPU Mocker over native
+  gRPC. Handoff scenarios also use the production PrefillRouter.
+- `native_engine.rs` calls the production sidecar engine library against real
+  vLLM or SGLang engines over native gRPC. The pytest launcher starts those engines
+  and the Rust test executable. Model inference and NIXL KV transfer use one GPU.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -163,6 +192,24 @@ KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
 retain broader media, LoRA, administrative and connection behavior. Python
 serving and fault-tolerance tests remain in place: passing this testkit does not
 establish complete parity with the legacy Python backend.
+
+### Relationship to serving E2E tests
+
+`tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
+and real engines. It checks HTTP serving, distinct prefill/decode workers and
+KV-aware routing. The native integration suite calls the Rust engine adapter
+directly, so it does not replace those deployment checks.
+
+The native suite adds detailed assertions beyond the existing sidecar E2E tests:
+token/logprob correspondence and structured JSON output, scheduler cleanup and
+recovery after explicit cancellation or consumer drop, and completed NIXL
+transfer bytes. Successful handoff overlaps with E2E split serving, but the
+native test also inspects the handoff metadata and decode output contract.
+Testing the same container does not make these assertions equivalent.
+
+The legacy Python backend suite is also distributed by behavior, including
+`tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
+`tests/fault_tolerance/migration/test_vllm.py`.
 
 ### Adding an integration test
 
@@ -225,12 +272,16 @@ cargo test --locked -p dynamo-sidecar-testkit --test cross_process
 
 ### Running native GPU integration tests
 
-Use the matching vLLM or SGLang test image and its pinned engine version. The
-launcher checks that Python vLLM and bundled `vllm-rs` versions agree, or that
-SGLang matches its pinned version. Model
-weights for `Qwen/Qwen3-0.6B` must already be cached. Compatibility and cancellation
-need one GPU. SGLang handoff shares one GPU; vLLM handoff needs two GPUs. The
-launcher assigns each engine its GPU and dynamically allocated ports.
+The GPU suite runs post-merge and nightly, separately from E2E, using the same
+backend test images, pinned engine versions, GPU runners and shared pytest setup
+as the sidecar E2E tests. It uses the same `predownload_models` fixture to prepare
+`Qwen/Qwen3-0.6B` before starting an engine. The launcher checks that the Python
+vLLM package and bundled `vllm-rs` versions agree, or that SGLang matches its
+pinned version. All three cases for each backend use one GPU.
+Handoff starts two independent engines on the same assigned GPU, with separate
+caches and dynamically allocated ports. It verifies transfer between engines,
+not cross-GPU transport. CI runs the cases sequentially; handoff has no combined
+memory profile for concurrent scheduling with other tests.
 
 Build the native Rust test executable on the same platform as the test image:
 
@@ -243,9 +294,27 @@ export DYNAMO_SIDECAR_NATIVE_TEST="$(jq -r \
 python3 -m pytest tests/sidecar/test_native_integration.py -m sglang -v
 ```
 
-Select `-m vllm` in the vLLM image. For vLLM on a one-GPU host, add `-k 'not handoff'`. Set `SIDECAR_NATIVE_MODEL_PATH` to an
-existing local model directory when needed. CI builds/uploads the executable in
+Select `-m vllm` in the vLLM image. Set `CUDA_VISIBLE_DEVICES` to select the GPU;
+the launcher uses the first visible device for both handoff engines. Set
+`SIDECAR_NATIVE_MODEL_PATH` to an existing local model directory when needed.
+For offline runs, also pass
+`--models-dir /path/to/hf_cache` with a populated cache to skip downloads.
+CI builds/uploads the executable in
 `shared-sidecar-tests.yml`, and the pytest job downloads it before starting the
-engines. The `native-tests` Cargo feature only enables this explicit GPU target;
-it is not needed for CPU tests. Do not interpret a pre-merge CPU pass as native
-GPU validation.
+engines through the same `shared-test.yml` workflow used by sidecar E2E. The extra
+CPU build produces a Rust test executable, not a separate runtime image. The
+`native-tests` Cargo feature enables this explicit GPU target. Pre-merge compiles
+it with `--no-run` on CPU alongside the ordinary CPU test execution; only
+post-merge and nightly execute it against real engines. A pre-merge CPU pass
+does not establish native GPU behavior.
+
+Both `post-merge-ci.yml` and `nightly-ci.yml` call `shared-sidecar-tests.yml`
+after their existing vLLM and SGLang image builds. Each backend runs when its
+image build succeeds. Native tests use that run's test image
+(including the nightly suffix for nightly runs). The normal E2E selection
+excludes `sidecar_native` to avoid running the suite twice, and the final workflow
+notification waits for the native job as well.
+
+The native suite has a separate GPU job with its own results and timeout. Its
+launcher in `tests/sidecar/test_native_integration.py` starts its own engine
+processes using the same image and pytest infrastructure as E2E.
