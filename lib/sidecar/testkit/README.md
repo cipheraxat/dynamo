@@ -59,10 +59,8 @@ and are local to the integration suite, rather than a public fixture API.
 Each top-level Rust file in `testkit/tests/` builds a separate test executable.
 The two CPU files separate direct engine calls from child-process startup,
 discovery and shutdown, making each setup easier to follow and run independently.
-Combining those files would preserve coverage; the split is an organizational
-choice, not a repository requirement. The separate `native_engine` target has
-an additional purpose: its Cargo feature keeps GPU execution out of ordinary
-CPU test runs while allowing a compile-only check.
+The separate `native_engine` target uses a Cargo feature to keep GPU execution
+out of ordinary CPU test runs while allowing a compile-only check.
 
 ## Adding a unit test
 
@@ -112,26 +110,16 @@ actual sidecar executable and use the production Worker, discovery and router.
 They create their own local tokenizer files, file-backed discovery and TCP
 connections; neither etcd nor NATS is required.
 
-```mermaid
-flowchart TD
-    U[Backend-local unit tests] --> C[Production conversion and lifecycle helpers]
-    W[conformance.rs: shared scenarios and backend assertions] --> F[Backend fixture]
-    F --> E[Production sidecar engine]
-    E -->|native gRPC| G[Per-request fault and observation controller]
-    G --> M[CPU Mocker scheduler]
-    P[cross_process.rs] --> D[Local discovery and TCP router]
-    D --> B[Sidecar child: production Worker and engine]
-    B -->|native gRPC| G
-    P --> R[Real PrefillRouter]
-    R --> B
-    N[pytest native launcher] --> T[native_engine.rs]
-    N --> V[Real vLLM processes and model weights]
-    T --> E2[Production sidecar engine]
-    E2 -->|native gRPC| V
-    V --> K[GPU scheduler and NIXL KV transfer]
-    H[Sidecar serving E2E tests] --> HTTP[HTTP frontend and production sidecar executable]
-    HTTP --> VE[Real inference-engine processes]
-```
+Each suite exercises a different request path:
+
+- `conformance.rs` uses a backend fixture to call the production sidecar engine
+  library, which sends native gRPC requests to a CPU Mocker.
+- `cross_process.rs` uses local discovery to find sidecar child processes and
+  sends requests to them over TCP. Each sidecar calls a CPU Mocker over native
+  gRPC. Handoff scenarios also use the production PrefillRouter.
+- `native_engine.rs` calls the production sidecar engine library against real
+  vLLM engines over native gRPC. The pytest launcher starts those engines and
+  the Rust test executable. Model inference and NIXL KV transfer use one GPU.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -288,9 +276,6 @@ after their existing vLLM image build. Native tests use that run's test image
 excludes `sidecar_native` to avoid running the suite twice, and the final workflow
 notification waits for the native job as well.
 
-The suites share the image and pytest infrastructure, not running engine
-processes: the native launcher in `tests/sidecar/test_native_integration.py`
-starts its own engines. A separate GPU job provides independent results and
-timeouts, but costs another runner allocation and engine startup. The source-file
-split does not require separate jobs; the native executable could also be
-provided to an existing E2E job if scheduling is consolidated later.
+The native suite has a separate GPU job with its own results and timeout. Its
+launcher in `tests/sidecar/test_native_integration.py` starts its own engine
+processes using the same image and pytest infrastructure as E2E.
