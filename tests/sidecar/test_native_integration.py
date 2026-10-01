@@ -20,6 +20,7 @@ from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.managed_process import ManagedProcess
 
 MODEL = "Qwen/Qwen3-0.6B"
+LORA = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = [
     pytest.mark.sidecar,
@@ -49,6 +50,7 @@ pytestmark = [
                 pytest.mark.profiled_vram_gib(
                     sglang_vram_gib if backend == "sglang" else vllm_vram_gib
                 ),
+                *([pytest.mark.model(LORA)] if "lora" in scenario else []),
             ],
             id=f"{backend}-{name}",
         )
@@ -68,7 +70,29 @@ pytestmark = [
                 3.5,
                 3.3,
             ),
-            ("handoff", "handoff_transfers_native_kv", 2, 5.7, 6.6),
+            ("handoff", "handoff_transfers_native_kv", 2, 6.3, 6.6),
+            (
+                "lora",
+                "lora_lifecycle_selects_native_adapter"
+                if backend == "vllm"
+                else "preloaded_lora_selects_native_adapter",
+                1,
+                3.7,
+                4.5,
+            ),
+            *(
+                [
+                    (
+                        "native-http",
+                        "native_http_stream_cancel_and_drop_recover",
+                        1,
+                        None,
+                        3.9,
+                    )
+                ]
+                if backend == "sglang"
+                else []
+            ),
         )
     ],
 )
@@ -106,7 +130,10 @@ def test_native_integration(
         SIDECAR_NATIVE_TRANSFER_PROBE=str(probe),
     )
     structured_tokens = tmp_path / "structured-tokens.json"
-    if scenario == "native_logprobs_and_structured_output_are_compatible":
+    if (
+        scenario == "native_logprobs_and_structured_output_are_compatible"
+        or "lora" in scenario
+    ):
         tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
         tokens = tokenizer.apply_chat_template(
             [{"role": "user", "content": "What is the capital of France?"}],
@@ -117,6 +144,15 @@ def test_native_integration(
         )
         environment["SIDECAR_NATIVE_STRUCTURED_PROMPT"] = json.dumps(tokens)
         environment["SIDECAR_NATIVE_STRUCTURED_TOKENS"] = str(structured_tokens)
+        environment["SIDECAR_NATIVE_LORA_PROMPT"] = json.dumps(tokens)
+    if "lora" in scenario:
+        from huggingface_hub import snapshot_download
+
+        adapter_path = snapshot_download(LORA, local_files_only=True)
+        environment["SIDECAR_NATIVE_LORA_PATH"] = adapter_path
+        environment["DYN_LORA_ENABLED"] = "true"
+        if backend == "vllm":
+            environment["VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES"] = adapter_path
     with contextlib.ExitStack() as stack:
         for index in range(engines):
             http_port = dynamo_dynamic_ports.system_ports[index]
@@ -149,6 +185,14 @@ def test_native_integration(
                 if scenario == "native_logprobs_and_structured_output_are_compatible":
                     separator = command.index("--")
                     command[separator:separator] = ["--reasoning-parser", "none"]
+                if "lora" in scenario:
+                    command += [
+                        "--enable-lora",
+                        "--max-loras",
+                        "2",
+                        "--max-lora-rank",
+                        "64",
+                    ]
                 if engines == 2:
                     command += [
                         "--kv-transfer-config",
@@ -185,6 +229,14 @@ def test_native_integration(
                     "1",
                     "--incremental-streaming-output",
                 ]
+                if "lora" in scenario:
+                    command += [
+                        "--enable-lora",
+                        "--max-lora-rank",
+                        "64",
+                        "--lora-paths",
+                        f"native-adapter={adapter_path}",
+                    ]
                 if engines == 2:
                     command += [
                         "--disaggregation-mode",

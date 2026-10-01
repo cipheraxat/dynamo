@@ -181,9 +181,9 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `conformance.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
+| `conformance.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks; SGLang HTTP discovery, opaque payloads, cancellation and isolation | CPU, ordinary pre-merge Cargo tests |
 | `cross_process.rs` | Both backends: registration/error recovery, readiness, startup failure, cancellation, SIGTERM and real PrefillRouter handoff; SGLang discovery identity, HealthCheck and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer between engines | GPU, post-merge and nightly via pytest |
+| `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer and cancellation recovery; vLLM LoRA lifecycle, SGLang preloaded LoRA and native HTTP | GPU, post-merge and nightly via pytest |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
@@ -195,6 +195,8 @@ its real scheduler work, or transfers GPU KV cache. CPU handoff checks
 opaque vLLM metadata and SGLang concurrent bootstrap coordination. Native handoff
 separately requires completed transfer bytes and checks decode output length and token usage.
 SGLang uses its native transfer metrics; vLLM uses the NIXL probe.
+vLLM cancels decode before submission and requires completed transfer, idle
+schedulers and a fresh successful handoff.
 SGLang also cancels decode while its native transfer queue has work, then
 requires that queue to drain before a following handoff succeeds. This does not
 establish migration or cancellation while transfer packets are in flight.
@@ -290,9 +292,10 @@ The GPU suite runs after sidecar E2E in the same one-GPU sidecar test container
 for each backend, in post-merge and nightly. The two suites have separate pytest
 steps, timeouts and results, and share the image, GPU assignment and pytest setup.
 Legacy backend jobs remain separate. The suite uses the `predownload_models`
-fixture to prepare `Qwen/Qwen3-0.6B` before starting an engine. The launcher checks
+fixture to prepare `Qwen/Qwen3-0.6B` and, for LoRA cases,
+`codelion/Qwen3-0.6B-accuracy-recovery-lora` before starting an engine. The launcher checks
 that the Python vLLM package and bundled `vllm-rs` versions agree, or that SGLang
-matches its pinned version. All three cases for each backend use one GPU.
+matches its pinned version. All four vLLM and five SGLang cases use one GPU.
 Handoff starts two independent engines on the same assigned GPU, with separate
 caches and dynamically allocated ports. It verifies transfer between engines,
 not cross-GPU transport. Each case has a profiled VRAM marker. CI runs the cases
@@ -314,6 +317,9 @@ the launcher uses the first visible device for both handoff engines. Set
 `SIDECAR_NATIVE_MODEL_PATH` to an existing local model directory when needed.
 For offline runs, also pass
 `--models-dir /path/to/hf_cache` with a populated cache to skip downloads.
+LoRA cases require the adapter snapshot to be cached as well; they use the real
+trained adapter to verify that selection changes native token scores. vLLM loads
+and unloads it through the sidecar control API; SGLang preloads it at startup.
 CI builds/uploads the executable in `shared-build-sidecar-tests.yml`, and the
 one-GPU sidecar job downloads it alongside the production sidecar binary.
 This CPU build produces a Rust test executable, not a separate runtime image. The

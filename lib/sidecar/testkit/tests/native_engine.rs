@@ -3,14 +3,23 @@
 
 use std::time::Duration;
 
+use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
-    BootstrapInfo, DisaggregationMode, EngineConfig, FinishReason, GenerateContext,
+    BackendError, BootstrapInfo, DisaggregationMode, EngineConfig, FinishReason, GenerateContext,
     GuidedDecodingOptions, LLMEngine, PrefillResult, PreprocessedRequest, testing::mock_context,
 };
+use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_sglang_sidecar::SglangSidecarEngine;
 use dynamo_sidecar_testkit::{bounded, fixtures};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use futures::StreamExt;
+
+#[allow(dead_code)]
+#[path = "support/process.rs"]
+mod process;
+#[allow(dead_code)]
+mod support;
 
 fn required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("native test requires {name}"))
@@ -337,6 +346,18 @@ async fn cancellation_and_consumer_drop_release_native_work(backend: Backend) {
     .expect("native cancellation scenario timed out");
 }
 
+fn vllm_transferred_bytes() -> u64 {
+    std::fs::read_to_string(required("SIDECAR_NATIVE_TRANSFER_PROBE"))
+        .expect("native NIXL telemetry must be recorded")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["bytes"]
+                .as_u64()
+                .unwrap()
+        })
+        .sum()
+}
+
 #[tokio::test]
 async fn vllm_handoff_transfers_native_kv() {
     tokio::time::timeout(Duration::from_secs(90), async {
@@ -352,62 +373,77 @@ async fn vllm_handoff_transfers_native_kv() {
             DisaggregationMode::Decode,
         )
         .await;
-        let outputs = fixtures::collect(
-            prefill.as_ref(),
-            request(8),
-            GenerateContext::new(mock_context(), None),
-        )
-        .await;
-        let outputs: Vec<_> = outputs.into_iter().collect::<Result<_, _>>().unwrap();
-        assert!(outputs.iter().all(|o| o.token_ids.is_empty()));
-        let last = outputs.last().unwrap();
-        assert_eq!(last.finish_reason, Some(FinishReason::Length));
-        let handoff = last
-            .disaggregated_params
-            .clone()
-            .expect("native prefill handoff");
-        assert!(
-            handoff["remote_engine_id"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty())
-        );
-        assert!(
-            handoff["remote_block_ids"]
-                .as_array()
-                .is_some_and(|ids| !ids.is_empty())
-        );
-        let mut request = request(8);
-        request.prefill_result = Some(PrefillResult {
-            disaggregated_params: handoff,
-            prompt_tokens_details: None,
-        });
-        let outputs = fixtures::collect(
-            decode.as_ref(),
-            request,
-            GenerateContext::new(mock_context(), None),
-        )
-        .await;
-        let values: Vec<_> = outputs
-            .iter()
-            .flat_map(|o| o.as_ref().unwrap().token_ids.iter().copied())
-            .collect();
-        assert_eq!(values.len(), 8);
-        dynamo_sidecar_testkit::assert::terminal(outputs, &values, 128, FinishReason::Length);
-        let telemetry = std::fs::read_to_string(required("SIDECAR_NATIVE_TRANSFER_PROBE"))
-            .expect("native NIXL telemetry must be recorded");
-        let bytes: u64 = telemetry
-            .lines()
-            .map(|line| {
-                serde_json::from_str::<serde_json::Value>(line).unwrap()["bytes"]
-                    .as_u64()
-                    .unwrap()
+        for (token, is_cancelled) in [(11, true), (12, false)] {
+            let mut prefill_request = request(8);
+            prefill_request.token_ids = vec![token; 128].into();
+            let mut decode_request = prefill_request.clone();
+            let outputs = fixtures::collect(
+                prefill.as_ref(),
+                prefill_request,
+                GenerateContext::new(mock_context(), None),
+            )
+            .await;
+            let outputs: Vec<_> = outputs.into_iter().collect::<Result<_, _>>().unwrap();
+            assert!(outputs.iter().all(|o| o.token_ids.is_empty()));
+            let last = outputs.last().unwrap();
+            assert_eq!(last.finish_reason, Some(FinishReason::Length));
+            let handoff = last
+                .disaggregated_params
+                .clone()
+                .expect("native prefill handoff");
+            assert!(
+                handoff["remote_engine_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            assert!(
+                handoff["remote_block_ids"]
+                    .as_array()
+                    .is_some_and(|ids| !ids.is_empty())
+            );
+            decode_request.prefill_result = Some(PrefillResult {
+                disaggregated_params: handoff,
+                prompt_tokens_details: None,
+            });
+            let before = vllm_transferred_bytes();
+            let context = mock_context();
+            if is_cancelled {
+                // Decode must finish the transfer even when cancelled before submission.
+                context.stop_generating();
+            }
+            let outputs = fixtures::collect(
+                decode.as_ref(),
+                decode_request,
+                GenerateContext::new(context, None),
+            )
+            .await;
+            let values: Vec<_> = outputs
+                .iter()
+                .flat_map(|o| o.as_ref().unwrap().token_ids.iter().copied())
+                .collect();
+            if is_cancelled {
+                assert!(values.is_empty());
+                let outputs: Vec<_> = outputs.into_iter().collect::<Result<_, _>>().unwrap();
+                assert_eq!(outputs.len(), 1);
+                assert_eq!(outputs[0].finish_reason, Some(FinishReason::Cancelled));
+            } else {
+                assert_eq!(values.len(), 8);
+                dynamo_sidecar_testkit::assert::terminal(
+                    outputs,
+                    &values,
+                    128,
+                    FinishReason::Length,
+                );
+            }
+            bounded("native completed KV transfer", async {
+                while vllm_transferred_bytes() <= before {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
             })
-            .sum();
-        assert!(
-            bytes > 0,
-            "successful stream alone does not establish KV transfer"
-        );
-        scheduler(Backend::Vllm, false).await;
+            .await;
+            scheduler(Backend::Vllm, false).await;
+            scheduler_at(Backend::Vllm, false, "SIDECAR_NATIVE_PREFILL_METRICS").await;
+        }
         prefill.cleanup().await.unwrap();
         decode.cleanup().await.unwrap();
     })
@@ -625,4 +661,259 @@ async fn sglang_handoff_transfers_native_kv() {
     })
     .await
     .expect("native SGLang bootstrap handoff timed out");
+}
+
+fn lora_request(adapter: Option<&str>) -> PreprocessedRequest {
+    let mut request = request(4);
+    request.token_ids = serde_json::from_str(&required("SIDECAR_NATIVE_LORA_PROMPT")).unwrap();
+    request.output_options.logprobs = Some(1);
+    request.routing = Some(RoutingHints {
+        lora_name: adapter.map(str::to_owned),
+        ..Default::default()
+    });
+    request
+}
+
+async fn lora_sample(engine: &dyn LLMEngine, adapter: Option<&str>) -> Vec<(u32, f64)> {
+    let request = lora_request(adapter);
+    let prompt_tokens = request.token_ids.len() as u32;
+    let outputs =
+        fixtures::collect(engine, request, GenerateContext::new(mock_context(), None)).await;
+    let sample: Vec<_> = outputs
+        .iter()
+        .flat_map(|output| {
+            let output = output.as_ref().unwrap();
+            output
+                .token_ids
+                .iter()
+                .copied()
+                .zip(output.log_probs.as_ref().unwrap().iter().copied())
+        })
+        .collect();
+    assert_eq!(sample.len(), 4);
+    assert!(sample.iter().all(|(_, logprob)| logprob.is_finite()));
+    let tokens: Vec<_> = sample.iter().map(|(token, _)| *token).collect();
+    dynamo_sidecar_testkit::assert::terminal(outputs, &tokens, prompt_tokens, FinishReason::Length);
+    sample
+}
+
+#[tokio::test]
+async fn vllm_lora_lifecycle_selects_native_adapter() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let env = process::Environment::new().await;
+        let engine = engine(
+            Backend::Vllm,
+            "SIDECAR_NATIVE_GRPC",
+            DisaggregationMode::Aggregated,
+        )
+        .await;
+        let endpoint = env.endpoint("backend");
+        let base = ModelDeploymentCard::with_name_only(&required("SIDECAR_NATIVE_MODEL"));
+        env.runtime
+            .discovery()
+            .register(
+                DiscoverySpec::from_model(
+                    env.namespace.clone(),
+                    "backend".into(),
+                    "generate".into(),
+                    &base,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        engine.on_endpoint_ready(endpoint).await.unwrap();
+        let baseline = lora_sample(engine.as_ref(), None).await;
+        let name = "native-adapter";
+        let loaded = engine
+            .engine_update(
+                "load_lora".into(),
+                serde_json::json!({
+                    "lora_name": name,
+                    "source": {"uri": format!("file://{}", required("SIDECAR_NATIVE_LORA_PATH"))}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(loaded["status"], "success", "{loaded}");
+        let id = loaded["lora_id"].as_u64().expect("native adapter ID");
+        assert!(id > 0);
+        let inventory = engine
+            .engine_update("list_loras".into(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(inventory["loras"], serde_json::json!({name: id}));
+        let cards = env.cards().await;
+        assert_eq!(cards.len(), 2);
+        assert!(cards.iter().any(|card| {
+            card.user_data
+                .as_ref()
+                .is_some_and(|data| data["lora_id"] == id)
+        }));
+        let adapted = lora_sample(engine.as_ref(), Some(name)).await;
+        assert_ne!(
+            adapted, baseline,
+            "the trained adapter must change native token scores"
+        );
+        let unloaded = engine
+            .engine_update("unload_lora".into(), serde_json::json!({"lora_name": name}))
+            .await
+            .unwrap();
+        assert_eq!(unloaded["status"], "success", "{unloaded}");
+        let inventory = engine
+            .engine_update("list_loras".into(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(inventory["loras"], serde_json::json!({}));
+        assert_eq!(env.cards().await.len(), 1);
+        let rejected = fixtures::collect(
+            engine.as_ref(),
+            lora_request(Some(name)),
+            GenerateContext::new(mock_context(), None),
+        )
+        .await;
+        let error =
+            dynamo_sidecar_testkit::assert::failure(rejected, &[], BackendError::InvalidArgument);
+        assert!(error.to_string().contains("unknown model or LoRA adapter"));
+        lora_sample(engine.as_ref(), None).await;
+        scheduler(Backend::Vllm, false).await;
+        engine.cleanup().await.unwrap();
+    })
+    .await
+    .expect("native LoRA lifecycle timed out");
+}
+
+#[tokio::test]
+async fn sglang_preloaded_lora_selects_native_adapter() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let engine = engine(
+            Backend::Sglang,
+            "SIDECAR_NATIVE_GRPC",
+            DisaggregationMode::Aggregated,
+        )
+        .await;
+        let baseline = lora_sample(engine.as_ref(), None).await;
+        let adapted = lora_sample(engine.as_ref(), Some("native-adapter")).await;
+        assert_ne!(
+            adapted, baseline,
+            "the preloaded adapter must change native token scores"
+        );
+        let rejected = fixtures::collect(
+            engine.as_ref(),
+            lora_request(Some("missing-adapter")),
+            GenerateContext::new(mock_context(), None),
+        )
+        .await;
+        assert!(
+            rejected.iter().any(Result::is_err),
+            "unknown native adapter must fail"
+        );
+        lora_sample(engine.as_ref(), None).await;
+        scheduler(Backend::Sglang, false).await;
+        engine.cleanup().await.unwrap();
+    })
+    .await
+    .expect("native preloaded LoRA timed out");
+}
+
+fn sglang_http_request(max_tokens: u32) -> PreprocessedRequest {
+    let mut request = request(max_tokens);
+    request.extra_args = Some(serde_json::json!({"sglang_tito": {
+        "sampling_params": {"max_new_tokens": max_tokens, "ignore_eos": true, "temperature": 0.0},
+        "return_logprob": true,
+        "top_logprobs_num": 2
+    }}));
+    request
+}
+
+async fn sglang_http_recovery(engine: &dyn LLMEngine) {
+    let outputs = fixtures::collect(
+        engine,
+        sglang_http_request(4),
+        GenerateContext::new(mock_context(), None),
+    )
+    .await;
+    let outputs: Vec<_> = outputs.into_iter().collect::<Result<_, _>>().unwrap();
+    assert!(
+        outputs.len() > 1,
+        "native HTTP must stream incremental output"
+    );
+    let mut token_count = 0;
+    for (index, output) in outputs.iter().enumerate() {
+        assert!(
+            output.token_ids.is_empty(),
+            "native HTTP keeps its payload opaque"
+        );
+        let raw = &output.engine_data.as_ref().unwrap()["sglang_response"];
+        token_count += raw["output_ids"].as_array().unwrap().len();
+        assert!(raw["meta_info"]["output_token_logprobs"].is_array());
+        if index + 1 < outputs.len() {
+            assert!(output.finish_reason.is_none());
+            assert!(raw["meta_info"]["finish_reason"].is_null());
+        } else {
+            assert_eq!(output.finish_reason, Some(FinishReason::Stop));
+            assert_eq!(raw["meta_info"]["finish_reason"]["type"], "length");
+            assert_eq!(raw["meta_info"]["prompt_tokens"], 128);
+            assert_eq!(raw["meta_info"]["completion_tokens"], 4);
+        }
+    }
+    assert_eq!(token_count, 4);
+}
+
+#[tokio::test]
+async fn sglang_native_http_stream_cancel_and_drop_recover() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let engine = engine(
+            Backend::Sglang,
+            "SIDECAR_NATIVE_GRPC",
+            DisaggregationMode::Aggregated,
+        )
+        .await;
+        sglang_http_recovery(engine.as_ref()).await;
+        for is_explicit in [true, false] {
+            scheduler(Backend::Sglang, false).await;
+            let context = mock_context();
+            let mut stream = engine
+                .generate(
+                    sglang_http_request(4096),
+                    GenerateContext::new(context.clone(), None),
+                )
+                .await
+                .unwrap();
+            let first = bounded("first native HTTP output", stream.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(first.finish_reason.is_none());
+            assert!(
+                !first.engine_data.as_ref().unwrap()["sglang_response"]["output_ids"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            scheduler(Backend::Sglang, true).await;
+            if is_explicit {
+                context.stop_generating();
+                let error = bounded("native HTTP cancellation", stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                assert_eq!(
+                    error.error_type(),
+                    dynamo_backend_common::ErrorType::Backend(BackendError::Cancelled)
+                );
+                assert!(
+                    bounded("native HTTP cancellation EOF", stream.next())
+                        .await
+                        .is_none()
+                );
+            }
+            drop(stream);
+            scheduler(Backend::Sglang, false).await;
+            sglang_http_recovery(engine.as_ref()).await;
+        }
+        engine.cleanup().await.unwrap();
+    })
+    .await
+    .expect("native HTTP cancellation timed out");
 }

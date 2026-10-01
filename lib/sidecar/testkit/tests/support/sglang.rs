@@ -29,6 +29,9 @@ use super::{
     fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
+#[path = "sglang_http.rs"]
+pub mod http;
+
 pub struct Fixture {
     config: FixtureConfig,
     service: SglangMockerService,
