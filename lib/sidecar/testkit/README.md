@@ -56,6 +56,14 @@ are development dependencies used by the integration tests. Production sidecars
 and Mockers do not depend on testkit. Backend fixtures live in `tests/support/`
 and are local to the integration suite, rather than a public fixture API.
 
+Each top-level Rust file in `testkit/tests/` builds a separate test executable.
+The two CPU files separate direct engine calls from child-process startup,
+discovery and shutdown, making each setup easier to follow and run independently.
+Combining those files would preserve coverage; the split is an organizational
+choice, not a repository requirement. The separate `native_engine` target has
+an additional purpose: its Cargo feature keeps GPU execution out of ordinary
+CPU test runs while allowing a compile-only check.
+
 ## Adding a unit test
 
 Add the test to its production module's existing test child module, or extend the
@@ -121,6 +129,8 @@ flowchart TD
     T --> E2[Production sidecar engine]
     E2 -->|native gRPC| V
     V --> K[GPU scheduler and NIXL KV transfer]
+    H[Sidecar serving E2E tests] --> HTTP[HTTP frontend and production sidecar executable]
+    HTTP --> VE[Real inference-engine processes]
 ```
 
 The controller sits at the native protocol boundary. Each request ID has its
@@ -159,6 +169,24 @@ KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
 retain broader media, LoRA, administrative and connection behavior. Python
 serving and fault-tolerance tests remain in place: passing this testkit does not
 establish complete parity with the legacy Python backend.
+
+### Relationship to serving E2E tests
+
+`tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
+and real engines. It checks HTTP serving, distinct prefill/decode workers and
+KV-aware routing. The native integration suite calls the Rust engine adapter
+directly, so it does not replace those deployment checks.
+
+The native suite adds detailed assertions beyond the existing sidecar E2E tests:
+token/logprob correspondence and structured JSON output, scheduler cleanup and
+recovery after explicit cancellation or consumer drop, and completed NIXL
+transfer bytes. Successful handoff overlaps with E2E split serving, but the
+native test also inspects the handoff metadata and decode output contract.
+Testing the same container does not make these assertions equivalent.
+
+The legacy Python backend suite is also distributed by behavior, including
+`tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
+`tests/fault_tolerance/migration/test_vllm.py`.
 
 ### Adding an integration test
 
@@ -253,3 +281,16 @@ CPU build produces a Rust test executable, not a separate runtime image. The
 it with `--no-run` on CPU alongside the ordinary CPU test execution; only
 post-merge and nightly execute it against real engines. A pre-merge CPU pass
 does not establish native GPU behavior.
+
+Both `post-merge-ci.yml` and `nightly-ci.yml` call `shared-sidecar-tests.yml`
+after their existing vLLM image build. Native tests use that run's test image
+(including the nightly suffix for nightly runs). The normal E2E selection
+excludes `sidecar_native` to avoid running the suite twice, and the final workflow
+notification waits for the native job as well.
+
+The suites share the image and pytest infrastructure, not running engine
+processes: the native launcher in `tests/sidecar/test_native_integration.py`
+starts its own engines. A separate GPU job provides independent results and
+timeouts, but costs another runner allocation and engine startup. The source-file
+split does not require separate jobs; the native executable could also be
+provided to an existing E2E job if scheduling is consolidated later.

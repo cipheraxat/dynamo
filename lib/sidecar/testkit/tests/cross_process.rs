@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -240,7 +239,11 @@ async fn failed_and_interrupted_startup_leave_no_registration<F: ProcessFixture>
         }
         let status = child.exit().await;
         if is_interrupted {
-            assert_eq!(status.signal(), Some(libc::SIGTERM), "{}", child.logs());
+            assert!(
+                status.success(),
+                "interrupted startup did not shut down cleanly\n{}",
+                child.logs()
+            );
         } else {
             assert!(
                 !status.success(),
