@@ -162,6 +162,15 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+# The sglang base image vendors FFmpeg inside the PyAV and opencv wheels
+# (av 8.0.1, opencv-python-headless 5.1.4). Replace them with wheels that
+# bundle FFmpeg 8.1.2 so CVE-2026-40962 and CVE-2026-8461 are not shipped.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --upgrade \
+        "av>=18.0.0" \
+        "opencv-python-headless>=4.14.0.94"
+
 {% if device == "cuda" %}
 
 # Patch stock DeepEP for Kimi K3, then rebuild a fat binary containing sm_90,
