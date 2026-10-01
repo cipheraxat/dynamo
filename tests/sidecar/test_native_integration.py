@@ -13,6 +13,7 @@ from importlib.metadata import version as package_version
 from pathlib import Path
 
 import pytest
+from transformers import AutoTokenizer
 
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.managed_process import ManagedProcess
@@ -49,7 +50,12 @@ pytestmark = [
             marks=pytest.mark.profiled_vram_gib(3.5),
             id="cancellation",
         ),
-        pytest.param("vllm_handoff_transfers_native_kv", 2, id="handoff"),
+        pytest.param(
+            "vllm_handoff_transfers_native_kv",
+            2,
+            marks=pytest.mark.profiled_vram_gib(5.7),
+            id="handoff",
+        ),
     ],
 )
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
@@ -78,8 +84,6 @@ def test_native_integration(
         SIDECAR_NATIVE_TRANSFER_PROBE=str(probe),
     )
     if scenario == "vllm_native_logprobs_and_structured_output_are_compatible":
-        from transformers import AutoTokenizer
-
         tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
         tokens = tokenizer.apply_chat_template(
             [{"role": "user", "content": "What is the capital of France?"}],

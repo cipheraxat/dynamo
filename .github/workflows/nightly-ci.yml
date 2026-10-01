@@ -341,8 +341,7 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA
-  # variants)
+  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA variants)
   # ============================================================================
   # Built HERE — not reused from post-merge — for two reasons:
   #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves
@@ -929,7 +928,12 @@ jobs:
   sidecar-vllm-test:
     name: sidecar-runtime
     needs: [vllm-build, sidecar-build, sidecar-native-build, resolve-source-sha, compute-release-mode]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    if: ${{ !cancelled()
+        && needs.vllm-build.result == 'success'
+        && needs.sidecar-build.result == 'success'
+        && needs.resolve-source-sha.result == 'success'
+        && needs.compute-release-mode.result == 'success'
+        && needs.compute-release-mode.outputs.run_tests == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -952,7 +956,7 @@ jobs:
       image_tag_suffix: '-nightly'
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.outputs.binary_artifact || '' }}
+      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
     secrets: inherit
 
   sidecar-sglang-test:
