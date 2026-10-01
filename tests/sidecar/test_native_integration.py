@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.managed_process import ManagedProcess
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -26,6 +27,7 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.post_merge,
     pytest.mark.nightly,
+    pytest.mark.gpu_1,
     pytest.mark.model(MODEL),
     pytest.mark.timeout(900),
     pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
@@ -38,18 +40,16 @@ pytestmark = [
         pytest.param(
             "vllm_native_logprobs_and_structured_output_are_compatible",
             1,
-            marks=[pytest.mark.gpu_1, pytest.mark.profiled_vram_gib(3.5)],
+            marks=pytest.mark.profiled_vram_gib(3.5),
             id="compatibility",
         ),
         pytest.param(
             "vllm_cancellation_and_consumer_drop_release_native_work",
             1,
-            marks=[pytest.mark.gpu_1, pytest.mark.profiled_vram_gib(3.5)],
+            marks=pytest.mark.profiled_vram_gib(3.5),
             id="cancellation",
         ),
-        pytest.param(
-            "vllm_handoff_transfers_native_kv", 2, marks=pytest.mark.gpu_2, id="handoff"
-        ),
+        pytest.param("vllm_handoff_transfers_native_kv", 2, id="handoff"),
     ],
 )
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
@@ -68,12 +68,7 @@ def test_native_integration(
         [native, "--version"], check=True, capture_output=True, text=True, timeout=10
     ).stdout.strip()
     assert version == f"vllm-rs {package_version('vllm')}", version
-    gpu_ids = os.environ.get(
-        "SIDECAR_NATIVE_GPUS", os.environ.get("CUDA_VISIBLE_DEVICES", "0,1")
-    ).split(",")
-    assert len(gpu_ids) >= engines and all(
-        gpu_ids
-    ), "Insufficient assigned GPUs for native integration"
+    gpu_id = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
     probe = tmp_path / "transfers.jsonl"
     probe.write_text("")
     model = os.environ.get("SIDECAR_NATIVE_MODEL_PATH", MODEL)
@@ -134,7 +129,7 @@ def test_native_integration(
                 ]
             env = dict(
                 environment,
-                CUDA_VISIBLE_DEVICES=gpu_ids[index],
+                CUDA_VISIBLE_DEVICES=gpu_id,
                 VLLM_NIXL_SIDE_CHANNEL_PORT=str(nixl_port),
                 VLLM_PLUGINS="",
                 PYTHONPATH=os.pathsep.join(

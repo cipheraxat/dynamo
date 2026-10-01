@@ -224,9 +224,11 @@ The GPU suite runs post-merge and nightly, separately from E2E, using the same
 vLLM test image, pinned engine version, GPU runners and shared pytest setup as the
 sidecar E2E tests. It uses the same `predownload_models` fixture to prepare
 `Qwen/Qwen3-0.6B` before starting an engine. The launcher checks that the Python
-vLLM package and bundled `vllm-rs` versions agree. Compatibility and cancellation
-need one GPU; handoff is scheduled on two GPUs. The launcher assigns each engine
-its GPU and dynamically allocated ports.
+vLLM package and bundled `vllm-rs` versions agree. All three cases use one GPU.
+Handoff starts two independent engines on the same assigned GPU, with separate
+caches and dynamically allocated ports. It verifies transfer between engines,
+not cross-GPU transport. CI runs the cases sequentially; handoff has no combined
+memory profile for concurrent scheduling with other tests.
 
 Build the native Rust test executable on the same platform as the test image:
 
@@ -239,13 +241,15 @@ export DYNAMO_SIDECAR_NATIVE_TEST="$(jq -r \
 python3 -m pytest tests/sidecar/test_native_integration.py -v
 ```
 
-For a one-GPU host, add `-k 'not handoff'`. Set `SIDECAR_NATIVE_MODEL_PATH` to an
-existing local model directory when needed. For offline runs, also pass
+Set `CUDA_VISIBLE_DEVICES` to select the GPU; the launcher uses the first visible
+device for both handoff engines. Set `SIDECAR_NATIVE_MODEL_PATH` to an existing
+local model directory when needed. For offline runs, also pass
 `--models-dir /path/to/hf_cache` with a populated cache to skip downloads.
 CI builds/uploads the executable in
 `shared-sidecar-tests.yml`, and the pytest job downloads it before starting the
 engines through the same `shared-test.yml` workflow used by sidecar E2E. The extra
 CPU build produces a Rust test executable, not a separate runtime image. The
-`native-tests` Cargo feature only enables this explicit GPU target; it is not
-enabled by pre-merge Cargo tests. Do not interpret a pre-merge CPU pass as native
-GPU validation.
+`native-tests` Cargo feature enables this explicit GPU target. Pre-merge compiles
+it with `--no-run` on CPU alongside the ordinary CPU test execution; only
+post-merge and nightly execute it against real engines. A pre-merge CPU pass
+does not establish native GPU behavior.

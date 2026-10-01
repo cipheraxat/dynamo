@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -228,19 +229,25 @@ async fn failed_and_interrupted_startup_leave_no_registration<F: ProcessFixture>
     assert!(!child.exit().await.success(), "{}", child.logs());
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());
-    for interrupt in [false, true] {
+    for is_interrupted in [false, true] {
         let env = Environment::new().await;
         let mut gate = Gate::new("http://127.0.0.1:1").await;
-        let mut child = env.spawn::<F>(&gate.endpoint, DisaggregationMode::Aggregated, 1);
+        let deadline = if is_interrupted { 30 } else { 1 };
+        let mut child = env.spawn::<F>(&gate.endpoint, DisaggregationMode::Aggregated, deadline);
         gate.accepted().await;
-        if interrupt {
+        if is_interrupted {
             child.signal(libc::SIGTERM);
         }
-        assert!(
-            !child.exit().await.success(),
-            "startup unexpectedly succeeded\n{}",
-            child.logs()
-        );
+        let status = child.exit().await;
+        if is_interrupted {
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{}", child.logs());
+        } else {
+            assert!(
+                !status.success(),
+                "startup unexpectedly succeeded\n{}",
+                child.logs()
+            );
+        }
         assert!(env.cards().await.is_empty());
         assert!(env.registrations("backend").await.is_empty());
         gate.shutdown().await;
