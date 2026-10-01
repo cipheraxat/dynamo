@@ -8,10 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 Unit tests live beside the production code they exercise. They construct inputs,
 call the real parsing, conversion or state-management functions, and check the
 results without starting an inference engine. Common behavior is tested in the
-common crate; vLLM behavior is tested in the vLLM crate. There is no shared unit
-scenario or backend-adapter layer. Shared CPU integration tests live in the testkit
-crate and connect real sidecars to local Mocker servers, which simulate engine
-responses without loading a model.
+common crate; backend behavior is tested in the vLLM or SGLang crate. There is
+no shared unit scenario or backend-adapter layer. Shared CPU integration tests live
+in the testkit crate and connect real sidecars to local Mocker servers, which
+simulate engine responses without loading a model.
 
 ## File layout
 
@@ -34,6 +34,14 @@ lib/sidecar/
 │   │   └── response_tests.rs   # Stream conversion, logprobs, stops and usage
 │   ├── test_fixtures.rs        # Native request, response and metadata builders
 │   └── tests.rs                # Broader tests using a local fake gRPC server
+├── sglang/src/
+│   ├── client.rs               # Inline tests: discovery, status mapping and RPC deadlines
+│   ├── engine.rs               # Inline tests: worker metadata, bootstrap and KV sources
+│   ├── native_http.rs          # Inline tests: envelopes, tracing and local HTTP server
+│   ├── protocol.rs             # Production conversion and child-module declarations
+│   └── protocol/
+│       ├── request_tests.rs    # Request fields, public refusals, routing and rendezvous
+│       └── response_tests.rs   # Token/logprob conversion, stops, usage and errors
 └── testkit/
     ├── src/
     │   ├── lib.rs              # Bounded waits and public testkit exports
@@ -56,7 +64,7 @@ lib/sidecar/
 
 Small suites use an inline `#[cfg(test)] mod tests` in their production module.
 The larger request and response suites are separate files, declared in
-`vllm/src/convert.rs`:
+`vllm/src/convert.rs` and `sglang/src/protocol.rs`:
 
 ```rust
 #[cfg(test)]
@@ -65,7 +73,7 @@ mod request_tests;
 mod response_tests;
 ```
 
-These are still child modules of `convert`, so `use super::*` gives them access
+These remain child modules of their production module, so `use super::*` gives them access
 to its private functions. A separate test file does not require making
 production functions public.
 
@@ -107,14 +115,20 @@ separate because these checks cover interactions across modules, while the
 isolated tests call functions directly. Both are compiled into the library's
 test binary.
 
+SGLang keeps discovery and worker fixtures in the owning inline modules and
+request/response fixtures in its protocol child modules. A private
+`from_discovered` helper lets worker tests exercise real construction without
+starting a server. Its retained gRPC and HTTP server tests cover the transport
+boundary; isolated conversion tests do not establish native engine behavior.
+
 ## Running tests
 
-From the repository root, run all common and vLLM library tests, including their
-local-server tests and the testkit controller regression:
+From the repository root, run all common, vLLM and SGLang library tests, including
+their local-server tests and the testkit controller regression:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
-  -p dynamo-sidecar-testkit --lib
+  -p dynamo-sglang-sidecar -p dynamo-sidecar-testkit --lib
 ```
 
 Run one request-conversion test by its full name:
@@ -281,8 +295,8 @@ that the Python vLLM package and bundled `vllm-rs` versions agree, or that SGLan
 matches its pinned version. All three cases for each backend use one GPU.
 Handoff starts two independent engines on the same assigned GPU, with separate
 caches and dynamically allocated ports. It verifies transfer between engines,
-not cross-GPU transport. CI runs the cases sequentially; handoff has no combined
-memory profile for concurrent scheduling with other tests.
+not cross-GPU transport. Each case has a profiled VRAM marker. CI runs the cases
+sequentially in the dedicated native step after E2E finishes.
 
 Build the native Rust test executable on the same platform as the test image:
 

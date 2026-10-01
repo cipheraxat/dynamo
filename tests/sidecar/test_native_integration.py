@@ -14,6 +14,7 @@ from importlib.metadata import version as package_version
 from pathlib import Path
 
 import pytest
+from transformers import AutoTokenizer
 
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.managed_process import ManagedProcess
@@ -45,23 +46,29 @@ pytestmark = [
                 pytest.mark.requested_vllm_kv_cache_bytes(1119388000)
                 if backend == "vllm"
                 else pytest.mark.requested_sglang_kv_tokens(8192 * engines),
-                *(
-                    [pytest.mark.profiled_vram_gib(3.5)]
-                    if backend == "vllm" and engines == 1
-                    else []
+                pytest.mark.profiled_vram_gib(
+                    sglang_vram_gib if backend == "sglang" else vllm_vram_gib
                 ),
             ],
             id=f"{backend}-{name}",
         )
         for backend in ("vllm", "sglang")
-        for name, scenario, engines in (
+        for name, scenario, engines, vllm_vram_gib, sglang_vram_gib in (
             (
                 "compatibility",
                 "native_logprobs_and_structured_output_are_compatible",
                 1,
+                3.5,
+                4.0,
             ),
-            ("cancellation", "cancellation_and_consumer_drop_release_native_work", 1),
-            ("handoff", "handoff_transfers_native_kv", 2),
+            (
+                "cancellation",
+                "cancellation_and_consumer_drop_release_native_work",
+                1,
+                3.5,
+                3.3,
+            ),
+            ("handoff", "handoff_transfers_native_kv", 2, 5.7, 6.6),
         )
     ],
 )
@@ -100,8 +107,6 @@ def test_native_integration(
     )
     structured_tokens = tmp_path / "structured-tokens.json"
     if scenario == "native_logprobs_and_structured_output_are_compatible":
-        from transformers import AutoTokenizer
-
         tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
         tokens = tokenizer.apply_chat_template(
             [{"role": "user", "content": "What is the capital of France?"}],

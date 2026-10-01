@@ -430,7 +430,7 @@ jobs:
       run: cargo test --locked --no-run
     - name: Compile native sidecar integration tests
       if: matrix.dir == '.'
-      run: cargo test --locked -p dynamo-sidecar-testkit --features native-tests --test native_engine --no-run
+      run: cargo test --locked --workspace --features dynamo-sidecar-testkit/native-tests --test native_engine --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc

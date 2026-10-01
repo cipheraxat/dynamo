@@ -500,7 +500,7 @@ impl ProcessFixture for Fixture {
 
     fn command() -> Command {
         let mut command = sidecar_command("dynamo-sglang-sidecar", "DYNAMO_SGLANG_SIDECAR");
-        command.env_remove("SGLANG_DISAGGREGATION_BOOTSTRAP_HOST");
+        command.env("SGLANG_DISAGGREGATION_BOOTSTRAP_HOST", "127.0.0.1");
         command
     }
 

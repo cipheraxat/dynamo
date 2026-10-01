@@ -475,11 +475,14 @@ jobs:
 
   sidecar-native-build:
     name: Build sidecar native tests
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true' || needs.config.outputs.run_sglang == 'true'
     uses: $/.github/workflows/shared-build-sidecar-tests.yml
 
   sidecar-vllm-test:
     name: sidecar-runtime
     needs: [vllm-build, sidecar-build, sidecar-native-build]
+    if: ${{ !cancelled() && needs.vllm-build.result == 'success' && needs.sidecar-build.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -499,12 +502,13 @@ jobs:
       gpu_test_timeout_minutes: 45
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.outputs.binary_artifact || '' }}
+      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
     secrets: inherit
 
   sidecar-sglang-test:
     name: sidecar-runtime
     needs: [sglang-build, sidecar-build, sidecar-native-build]
+    if: ${{ !cancelled() && needs.sglang-build.result == 'success' && needs.sidecar-build.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -524,7 +528,7 @@ jobs:
       gpu_test_timeout_minutes: 45
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.outputs.binary_artifact || '' }}
+      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
     secrets: inherit
 
   sidecar-trtllm-test:

@@ -598,6 +598,12 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
         router.generate(env.request("failed-prefill", 3), decode_router.clone()),
     )
     .await;
+    if !F::HAS_BOOTSTRAP {
+        assert!(
+            result.is_err(),
+            "failed prefill must not produce a successful handoff"
+        );
+    }
     match result {
         Err(_) => {}
         Ok(stream) => {
