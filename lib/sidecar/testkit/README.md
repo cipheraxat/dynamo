@@ -272,12 +272,13 @@ cargo test --locked -p dynamo-sidecar-testkit --test cross_process
 
 ### Running native GPU integration tests
 
-The GPU suite runs post-merge and nightly, separately from E2E, using the same
-backend test images, pinned engine versions, GPU runners and shared pytest setup
-as the sidecar E2E tests. It uses the same `predownload_models` fixture to prepare
-`Qwen/Qwen3-0.6B` before starting an engine. The launcher checks that the Python
-vLLM package and bundled `vllm-rs` versions agree, or that SGLang matches its
-pinned version. All three cases for each backend use one GPU.
+The GPU suite runs after sidecar E2E in the same one-GPU sidecar test container
+for each backend, in post-merge and nightly. The two suites have separate pytest
+steps, timeouts and results, and share the image, GPU assignment and pytest setup.
+Legacy backend jobs remain separate. The suite uses the `predownload_models`
+fixture to prepare `Qwen/Qwen3-0.6B` before starting an engine. The launcher checks
+that the Python vLLM package and bundled `vllm-rs` versions agree, or that SGLang
+matches its pinned version. All three cases for each backend use one GPU.
 Handoff starts two independent engines on the same assigned GPU, with separate
 caches and dynamically allocated ports. It verifies transfer between engines,
 not cross-GPU transport. CI runs the cases sequentially; handoff has no combined
@@ -299,22 +300,21 @@ the launcher uses the first visible device for both handoff engines. Set
 `SIDECAR_NATIVE_MODEL_PATH` to an existing local model directory when needed.
 For offline runs, also pass
 `--models-dir /path/to/hf_cache` with a populated cache to skip downloads.
-CI builds/uploads the executable in
-`shared-sidecar-tests.yml`, and the pytest job downloads it before starting the
-engines through the same `shared-test.yml` workflow used by sidecar E2E. The extra
-CPU build produces a Rust test executable, not a separate runtime image. The
+CI builds/uploads the executable in `shared-build-sidecar-tests.yml`, and the
+one-GPU sidecar job downloads it alongside the production sidecar binary.
+This CPU build produces a Rust test executable, not a separate runtime image. The
 `native-tests` Cargo feature enables this explicit GPU target. Pre-merge compiles
 it with `--no-run` on CPU alongside the ordinary CPU test execution; only
 post-merge and nightly execute it against real engines. A pre-merge CPU pass
 does not establish native GPU behavior.
 
-Both `post-merge-ci.yml` and `nightly-ci.yml` call `shared-sidecar-tests.yml`
-after their existing vLLM and SGLang image builds. Each backend runs when its
-image build succeeds. Native tests use that run's test image
-(including the nightly suffix for nightly runs). The normal E2E selection
-excludes `sidecar_native` to avoid running the suite twice, and the final workflow
-notification waits for the native job as well.
+Both `post-merge-ci.yml` and `nightly-ci.yml` run the native step through
+`shared-test.yml` in the existing one-GPU vLLM and SGLang sidecar jobs. Each
+backend depends on its own image build. The E2E selection excludes `sidecar_native`;
+the following native step selects only those tests
+and runs them sequentially with retries disabled. Both steps contribute to the
+job's final result. The two-GPU sidecar job does not receive the native artifact.
 
-The native suite has a separate GPU job with its own results and timeout. Its
-launcher in `tests/sidecar/test_native_integration.py` starts its own engine
-processes using the same image and pytest infrastructure as E2E.
+The launcher in `tests/sidecar/test_native_integration.py` starts and cleans up
+its engine processes inside the existing container after the E2E step finishes.
+There is no additional native GPU job or test-container startup.

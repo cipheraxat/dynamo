@@ -473,20 +473,13 @@ jobs:
   # TEST JOBS
   # ============================================================================
 
-  sidecar-native-test:
-    name: sidecar native integration
-    needs: [vllm-build, sglang-build]
-    if: ${{ !cancelled() && (needs.vllm-build.result == 'success' || needs.sglang-build.result == 'success') }}
-    uses: $/.github/workflows/shared-sidecar-tests.yml
-    with:
-      target_tag_plain: ${{ needs.vllm-build.result == 'success' && needs.vllm-build.outputs.target_tag_plain || '' }}
-      sglang_target_tag_plain: ${{ needs.sglang-build.result == 'success' && needs.sglang-build.outputs.target_tag_plain || '' }}
-      dd_env: post-merge
-    secrets: inherit
+  sidecar-native-build:
+    name: Build sidecar native tests
+    uses: $/.github/workflows/shared-build-sidecar-tests.yml
 
   sidecar-vllm-test:
     name: sidecar-runtime
-    needs: [vllm-build, sidecar-build]
+    needs: [vllm-build, sidecar-build, sidecar-native-build]
     strategy:
       fail-fast: false
       matrix:
@@ -496,7 +489,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: vllm
       framework: vllm
-      test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      test_type: ${{ format('vLLM Sidecar {0}-GPU Tests', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
@@ -506,11 +499,12 @@ jobs:
       gpu_test_timeout_minutes: 45
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.outputs.binary_artifact || '' }}
     secrets: inherit
 
   sidecar-sglang-test:
     name: sidecar-runtime
-    needs: [sglang-build, sidecar-build]
+    needs: [sglang-build, sidecar-build, sidecar-native-build]
     strategy:
       fail-fast: false
       matrix:
@@ -520,7 +514,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: sglang
       framework: sglang
-      test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      test_type: ${{ format('SGLang Sidecar {0}-GPU Tests', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
@@ -530,6 +524,7 @@ jobs:
       gpu_test_timeout_minutes: 45
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.outputs.binary_artifact || '' }}
     secrets: inherit
 
   sidecar-trtllm-test:
@@ -1743,7 +1738,7 @@ jobs:
 
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, sidecar-native-test]
+    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
