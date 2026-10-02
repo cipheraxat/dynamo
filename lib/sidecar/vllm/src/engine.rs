@@ -783,6 +783,18 @@ impl LLMEngine for VllmSidecarEngine {
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
+        if !self.model.supports_reasoning_controls()
+            && (proto_request.reasoning_ended.is_some()
+                || proto_request.reasoning_parser_kwargs.is_some()
+                || proto_request
+                    .stopping
+                    .as_ref()
+                    .is_some_and(|stopping| stopping.thinking_token_budget.is_some()))
+        {
+            return Err(client::invalid_argument(
+                "vLLM server does not advertise supports_reasoning_controls; upgrade vLLM to forward reasoning metadata or thinking_token_budget",
+            ));
+        }
         proto_request.model.clone_from(&self.model.served_name);
         if self.model.is_base_model_name(&proto_request.lora_name) {
             // Routers may address the base model by name through the adapter field.

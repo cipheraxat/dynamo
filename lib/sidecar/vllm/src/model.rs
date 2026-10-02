@@ -105,7 +105,16 @@ impl DiscoveredModel {
                 self.server.rl_capabilities, observed.server.rl_capabilities
             )));
         }
+        if self.server.supports_reasoning_controls != observed.server.supports_reasoning_controls {
+            return Err(client::protocol_error(
+                "reasoning control support changed between bootstrap and startup",
+            ));
+        }
         Ok(())
+    }
+
+    pub(crate) fn supports_reasoning_controls(&self) -> bool {
+        self.server.supports_reasoning_controls
     }
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {

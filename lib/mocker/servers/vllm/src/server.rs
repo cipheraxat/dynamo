@@ -144,6 +144,7 @@ impl VllmMockerService {
                 .unwrap_or_default(),
             effective_attention_block_size: Some(engine_args.block_size as u64),
             rl_capabilities: None,
+            supports_reasoning_controls: false,
         };
         // The wire role is separate from the aggregated scheduler used to
         // emulate disaggregated requests.
@@ -342,6 +343,15 @@ impl pb::inference_server::Inference for VllmMockerService {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for VllmMockerService {
+    async fn shutdown(
+        &self,
+        _: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented(
+            "shutdown is not supported by the mocker",
+        ))
+    }
+
     async fn load_lora(
         &self,
         _request: Request<pb::LoadLoraRequest>,

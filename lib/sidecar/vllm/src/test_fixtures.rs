@@ -65,6 +65,7 @@ pub(crate) fn server_info() -> pb::ServerInfo {
         max_batched_tokens: 2048,
         max_loras: 4,
         effective_attention_block_size: None,
+        supports_reasoning_controls: true,
         rl_capabilities: Some(pb::RlCapabilities {
             weight_transfer_enabled: true,
             weight_transfer_backend: "nccl".to_string(),
@@ -104,6 +105,7 @@ pub(crate) fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            ..Default::default()
         }),
     }
 }
@@ -139,6 +141,7 @@ pub(crate) fn encode_response(
                 kv_transfer_params: None,
                 ec_transfer_params,
             }),
+            ..Default::default()
         }),
     }
 }
