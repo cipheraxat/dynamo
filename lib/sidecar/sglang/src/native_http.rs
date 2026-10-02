@@ -9,7 +9,7 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
-use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
 use serde_json::{Map, Value};
 use tokio::time::Instant;
@@ -141,6 +141,7 @@ struct AbortGuard<'a> {
     native_http: &'a NativeHttp,
     request_id: Option<String>,
     runtime: Option<tokio::runtime::Handle>,
+    opening: Option<BoxFuture<'static, Result<Response, DynamoError>>>,
     stream: BoxStream<'static, Result<String, LinesCodecError>>,
 }
 
@@ -153,6 +154,7 @@ impl Drop for AbortGuard<'_> {
             return;
         };
         let native_http = self.native_http.clone();
+        let opening = self.opening.take();
         let stream = std::mem::replace(&mut self.stream, Box::pin(futures::stream::empty()));
         runtime.spawn(async move {
             let result = native_http
@@ -164,6 +166,7 @@ impl Drop for AbortGuard<'_> {
                 .await
                 .and_then(Response::error_for_status);
             // Disconnecting first removes the request state needed by SGLang's abort handler.
+            drop(opening);
             drop(stream);
             if let Err(error) = result {
                 tracing::debug!(%request_id, %error, "failed to abort SGLang native HTTP request");
@@ -257,12 +260,12 @@ impl NativeHttp {
         }
     }
 
-    async fn open(&self, body: &Value) -> Result<Response, DynamoError> {
+    async fn open(self, body: Value) -> Result<Response, DynamoError> {
         let response = self
             .client
             .post(self.endpoint.with_path("/generate"))
             .header(header::ACCEPT, "text/event-stream")
-            .json(body)
+            .json(&body)
             .send()
             .await
             .map_err(request_error)?;
@@ -291,6 +294,7 @@ impl NativeHttp {
                 native_http: &self,
                 request_id: Some(ctx.id().to_string()),
                 runtime: tokio::runtime::Handle::try_current().ok(),
+                opening: Some(Box::pin(self.clone().open(request.body))),
                 stream: Box::pin(futures::stream::empty()),
             };
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
@@ -298,7 +302,7 @@ impl NativeHttp {
                 biased;
                 _ = ctx.stopped() => None,
                 _ = cancel.cancelled() => None,
-                response = self.open(&request.body) => Some(response),
+                response = abort_guard.opening.as_mut().unwrap() => Some(response),
             };
             let Some(response) = opened else {
                 drop(abort_guard);
@@ -308,6 +312,7 @@ impl NativeHttp {
                 )));
                 return;
             };
+            abort_guard.opening = None;
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
